@@ -6,24 +6,24 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  React + Vite  (localhost:5173)                 │
-│  Pages: Home · Patient · Settings              │
+│  Next.js  (localhost:3000)                      │
+│  Pages: Home · Patient                          │
 └───────────────────┬─────────────────────────────┘
                     │ HTTP / JSON
 ┌───────────────────▼─────────────────────────────┐
-│  FastAPI  (localhost:8000)                      │
+│  FastAPI  (localhost:8000) example URLs         │
 │                                                 │
 │  POST /ingest/{id}  →  Background job           │
-│  POST /chat         →  patient.md + Ollama      │
-│  GET  /timeline     →  patients.json            │
-│  GET  /summary      →  patients.json            │
+│  POST /chat         →  turn assembly + Ollama   │
+│  GET  /timeline     →  patients/{slug}/patient.json │
+│  GET  /summary      →  patients/{slug}/patient.json │
 └──────────┬──────────────────────┬───────────────┘
            │                      │
-┌──────────▼──────┐    ┌──────────▼──────────────┐
+┌──────────▼──────┐    ┌──────────▼───────────────┐
 │  Ollama         │    │  ChromaDB (persistent)   │
-│  medgemma1.5    │    │  ~/openhealth_data/      │
+│  MedGemma1.5    │    │  /data/memory_db/        │
 │  nomic-embed    │    │  memory_db/              │
-└─────────────────┘    └─────────────────────────┘
+└─────────────────┘    └──────────────────────────┘
 ```
 
 ---
@@ -32,15 +32,22 @@
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 18, Vite, React Router v6 |
+| Frontend | Next.js (App Router) |
+| Styling | Tailwind CSS v4 |
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | AI inference | Ollama (local) |
-| Default chat model | `medgemma1.5:latest` |
+| Default chat model | `MedAIBase/MedGemma1.5:4b` |
 | Default embedding model | `nomic-embed-text` (768-dim) |
 | Vector store | ChromaDB (persistent, cosine similarity) |
 | PDF extraction | PyMuPDF (fitz) |
 | OCR | Tesseract 5 via PyMuPDF `get_textpage_ocr()` |
-| Data persistence | JSON file (`~/openhealth_data/patients.json`) |
+| Data persistence | JSON files (`patients.json` thin index + per-patient `patients/{slug}/patient.json`) |
+
+This solution needs to be easily copied and run locally by people who likely don't have python or node knowledge (or the rest). Docker Compose handles all components and wires them together.
+
+**Ollama** is included in `docker-compose.yml` as an **optional** service (CPU-only). Users with Ollama already running on the host can comment it out and point `OLLAMA_BASE_URL` to `host.docker.internal:11434`. The Ollama service profile is named `ollama` so it can be excluded with `--profile` flags.
+
+**Patient creation** — the user provides a name in the UI. The backend slugifies the name (e.g. "Mary Johnson" → `mary-johnson`) and creates `./data/patients/mary-johnson/` automatically. No folder path is entered by the user. If a folder with that slug already exists (e.g. a second patient named "John Smith" when `john-smith` is taken), a numeric counter is appended: `john-smith-2`, `john-smith-3`, etc. After the patient is created, the user is immediately presented with a file upload interface to drop or select files from their computer. Uploaded files are written by the backend into the patient's folder inside the Docker-mounted volume. Upload completion automatically triggers ingestion.
 
 ---
 
@@ -53,8 +60,11 @@
 | `.tif` / `.tiff` | Pillow + pytesseract |
 | `.txt` | direct read |
 | `.html` | tag stripping + html.unescape |
+| `.json` | LLM-assisted extraction (flexible, structure-agnostic) |
 
 Scanned PDFs that produce no text via PyMuPDF automatically fall back to Tesseract. Files where OCR also yields nothing are recorded as processed (so they don't re-appear as "new") but excluded from `patient.md`.
+
+**JSON ingestion**: Because provider-exported JSON files have no standard structure, the raw JSON is serialised to a human-readable string and passed to the LLM with a prompt asking it to extract all clinically relevant information as plain text. The resulting text is then chunked and embedded like any other document. No assumptions are made about field names or nesting.
 
 ---
 
@@ -81,7 +91,15 @@ PDFs / TIFFs / TXTs / HTMLs
 
 Ingestion runs as a background job. Frontend polls `/status/{job_id}` every 2 seconds and displays live progress.
 
-On refresh (new files detected): `patient.md` is fully rebuilt from scratch and the `_docs` ChromaDB collection is cleared and re-embedded. This ensures document order, boundaries, and chunk indexes are always consistent. Chat history in `_chat` is never cleared on refresh.
+Ingestion is triggered automatically after file upload completes (incremental). Advanced users who manually copy files into `uploads/` are also supported via a **directory watcher**: the backend watches each patient's `uploads/` folder using `watchdog` and triggers an incremental job whenever new files are detected.
+
+**Incremental ingestion** (default for upload and watcher): only files not yet recorded in `patient.json` or files detected as changed are processed. Change detection uses file modification timestamp and file size (`mtime`, `size`) tracked per document record. `patient.md` is appended/updated for those files and only corresponding chunks are upserted in the `_docs` ChromaDB collection. Existing chat history is untouched.
+
+**Full rebuild** (`POST /rebuild/{patient_id}`): clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. Timeline and summary are also regenerated. Chat history in `_chat` is never cleared on any rebuild. This is exposed in the UI as a "Rebuild from scratch" action for cases where document order or extraction quality needs to be reset.
+
+**File scan rules**: uploaded files are stored in the `uploads/` subfolder of each patient folder. Ingestion scans only the top level of `uploads/` — subdirectories within it are ignored. The only exclusion applied is `*.extracted` files (they are cached extraction outputs, not source documents). All other files matching supported extensions (`.pdf`, `.tif`, `.tiff`, `.txt`, `.html`, `.json`) are processed. App-generated files (`patient.json`, `patient.md`) live outside `uploads/` in the patient root and are never scanned.
+
+Patients can have multiple independent chat sessions over the same document set. Each session has isolated memory and isolated conversation state.
 
 ---
 
@@ -121,27 +139,49 @@ Documents are ordered chronologically by detected date. This structure ensures t
 ## Chat Pipeline
 
 ```
+User selects or creates Chat (chat_session_id)
+  │
+  ▼
 User question
       │
       ▼
+classify_query()               ← detects document_type of the query (e.g. lab, medication, procedure) to optimise retrieval strategy
+      │
+      ▼
+retrieve_chat_history()        ← ChromaDB semantic memory (top-K) filtered by patient_id + chat_session_id
+  │
+  ▼
+load_conversation_state()      ← persisted rolling summary + open threads + facts for chat_session_id
+      │
+      ▼
 read_patient_md()              ← full record with document boundaries
+  │
+  ▼
+assemble_turn_context()        ← stateless packet for this turn only
+  - patient.md (or docs fallback if too large)
+  - relevant prior exchanges
+  - conversation_state capsule
+  - current user question
       │
       ▼
-retrieve_chat_history()        ← ChromaDB: last N relevant exchanges for this patient
+Ollama (MedAIBase/MedGemma1.5:4b)
+  │
+  ▼
+verify_grounding()             ← citation + factual support check
       │
       ▼
-CHAT_SYSTEM + patient.md       ← embedded in system prompt
-      + retrieved chat history  ← injected as prior context
+finalize_response()            ← answer + citations + uncertainty notes
       │
       ▼
-Ollama (medgemma1.5:latest)    ← sees full record + relevant history
-      │
-      ▼
-Response + citation parsing
-      │
-      ▼
-store_exchange()               ← embed and store Q&A pair in ChromaDB
+store_exchange()               ← embed/store Q&A in ChromaDB
+  │
+  ▼
+update_conversation_state()    ← refresh rolling summary + unresolved questions for chat_session_id
 ```
+
+This pipeline is intentionally **stateless at inference time**. Every turn is rebuilt from persisted memory and patient data, rather than relying on model-internal multi-turn state.
+
+Memory isolation rule: retrieval and state updates are always filtered by both `patient_id` and `chat_session_id`. Cross-session retrieval is never allowed.
 
 ---
 
@@ -159,24 +199,48 @@ ChromaDB serves two distinct purposes:
 - Every chat exchange (question + response) is embedded and stored after each turn
 - Retrieved semantically before each new message — surfaces relevant past exchanges, not just the most recent ones
 - Gives the model awareness of what has been discussed previously without passing the entire chat history on every call
-- Metadata: `{ patient_id, role, timestamp }`
-- Collection name: `patient_{patient_id}_chat`
+- Metadata: `{ patient_id, chat_session_id, role, timestamp }`
+- Collection name: `patient_{patient_id}_chat_{chat_session_id}`
+- Guardrail: all memory queries include an explicit metadata filter on both patient and session IDs
 
 ---
 
 ## Data Model
 
-### Patient
+### Patient Index entry (`patients.json`)
+```json
+[
+    {
+    "id": "uuid",
+    "name": "Mary Johnson",
+    "folder_slug": "mary-johnson",
+    "folder_path": "/data/patients/mary-johnson",
+    "document_count": 12,
+    "last_ingested_at": "ISO timestamp",
+    "created_at": "ISO timestamp"
+    }
+]
+```
+
+`patients.json` is a flat array of these index entries — the only file read when listing patients. `document_count` and `last_ingested_at` are denormalized here so the home page can display them without loading each `patient.json`. Both are updated at the end of every ingestion job.
+
+### Patient Record (`/patients/{patient_id}/patient.json`)
 ```json
 {
   "id": "uuid",
-  "name": "string",
-  "folder_path": "/absolute/path/to/folder",
-  "created_at": "ISO timestamp",
   "last_ingested_at": "ISO timestamp",
-  "document_count": 12
+  "document_count": 12,
+  "documents": [],
+  "timeline": [],
+  "summary": "string",
+  "chat_sessions": [],
+  "conversation_states": {},
+  "memory_results_override": null,
+  "context_window_tokens_override": null
 }
 ```
+
+`memory_results_override` and `context_window_tokens_override` are per-patient overrides of the corresponding global config values. When non-null, they take precedence over config for that patient only. When `null`, global config is used.
 
 ### Document
 ```json
@@ -184,11 +248,13 @@ ChromaDB serves two distinct purposes:
   "id": "uuid",
   "patient_id": "uuid",
   "filename": "discharge_summary_jan2026.pdf",
-  "file_path": "/absolute/path/to/file",
-  "extracted_text": "string",
+  "file_path": "./uploads/{patient-provided-file-name}",
+  "extracted_file_path": "./uploads/{patient-provided-file-name}.extracted",
   "date_detected": "2026-01-15",
   "document_type": "discharge summary | lab result | imaging | prescription | clinical note | unknown",
-  "ingested_at": "ISO timestamp"
+  "ingested_at": "ISO timestamp",
+  "mtime": "float (Unix timestamp, from os.path.getmtime)",
+  "size": "int (bytes, from os.path.getsize)"
 }
 ```
 
@@ -220,26 +286,90 @@ ChromaDB serves two distinct purposes:
 }
 ```
 
+### Conversation State
+```json
+{
+  "patient_id": "uuid",
+  "session_id": "uuid",
+  "title": "Follow-up questions after discharge",
+  "rolling_summary": "string",
+  "active_topics": ["medication side effects", "follow-up imaging"],
+  "open_questions": ["Is lisinopril still current?"],
+  "created_at": "ISO timestamp",
+  "last_updated_at": "ISO timestamp"
+}
+```
+
+This object is maintained server-side and refreshed each turn. It is a compact, structured memory capsule that compensates for MedGemma not being optimized for long multi-turn dialog.
+
+### Chat Session
+```json
+{
+  "id": "uuid",
+  "patient_id": "uuid",
+  "title": "Medication review",
+  "title_auto_generated": true,
+  "created_at": "ISO timestamp",
+  "last_message_at": "ISO timestamp",
+  "message_count": 23
+}
+```
+
+Each patient can have many chat sessions. Sessions are independent memory scopes over the same underlying documents.
+
+The `title` is set to "New Chat" on creation. After the first exchange completes, the backend generates a descriptive title using the LLM and updates the session. Once a user manually renames the session, `title_auto_generated` is set to `false` and automatic titling is suppressed.
+
+### Chat Message Log (`patients/{slug}/chats/{session_id}.json`)
+```json
+{
+  "session_id": "uuid",
+  "messages": [
+    {
+      "id": "uuid",
+      "role": "user | assistant",
+      "content": "string",
+      "citations": [
+        { "filename": "string", "excerpt": "string" }
+      ],
+      "timestamp": "ISO timestamp"
+    }
+  ]
+}
+```
+
+This flat ordered log is the source of truth for rendering chat history in the UI. It is separate from the ChromaDB semantic memory, which is used only for retrieval during turn assembly.
+
 ---
 
 ## API Endpoints
 
 ### Patients
 - `GET /patients` — list all patients
-- `POST /patients` — create patient `{ name, folder_path }`
-- `GET /patients/{id}` — get patient detail
-- `DELETE /patients/{id}` — delete patient and all ChromaDB data
+- `POST /patients` — create patient `{ name }`. Backend slugifies name, creates folder, returns `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }` (same thin shape as `GET /patients/{id}`).
+- `POST /patients/{id}/upload` — upload one or more files (multipart/form-data). Files are written to `./data/patients/{slug}/uploads/`. Returns `{ filenames[], job_id }`. Triggers ingestion automatically upon completion; `job_id` can be used immediately to poll `/status/{job_id}`.
+- `GET /patients/{id}` — get thin patient detail only: `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }`. Summary, timeline, chat sessions, and messages are fetched from their dedicated endpoints.
+- `PATCH /patients/{id}` — update patient fields. Accepts any subset of `{ name, memory_results_override, context_window_tokens_override }`. Renaming updates the `patients.json` index entry name; the folder slug is never changed. Returns the updated thin patient shape.
+- `DELETE /patients/{id}` — remove a patient from the list. The frontend shows a confirmation modal with checkboxes (all defaulted to on) before calling this endpoint:
+  - Remove uploaded source files (`uploads/` folder)
+  - Remove chat message logs (`chats/` folder)
+  - Remove patient record (`patient.json`, `patient.md`, `.extracted` files)
+  - Remove ChromaDB collections
+  The endpoint accepts `{ delete_uploads: bool, delete_chats: bool, delete_record_files: bool, delete_vector_data: bool }` and always removes the `patients.json` index entry.
+  If all delete flags are `false`, the behavior is still valid: remove only the `patients.json` entry and keep all patient data on disk/vector store.
 
 ### Ingestion
-- `POST /ingest/{patient_id}` — start background ingestion, returns `{ job_id }` immediately
-- `POST /refresh/{patient_id}` — start background refresh (new files only), returns `{ job_id }`
+- `POST /ingest/{patient_id}` — start incremental ingestion (new/changed files only), returns `{ job_id }` immediately
+- `POST /rebuild/{patient_id}` — force a full rebuild: clears `patient.md`, all `_docs` ChromaDB chunks, and re-processes every file in `uploads/`. Returns `{ job_id }`. Exposed in the UI as a "Rebuild from scratch" action on the patient page.
+- `POST /refresh/{patient_id}` — alias for incremental ingest; kept for internal use by the watcher
 - `GET /status/{job_id}` — returns job status and progress
 - `GET /documents/{patient_id}` — list all ingested documents
+- `GET /patients/{id}/active-job` — returns the currently running ingestion job for a patient (or `null`). Used by the frontend to discover watcher-triggered jobs and display progress without a client-initiated `job_id`.
 
 ### Summary & Timeline
-- `GET /summary/{patient_id}` — return stored summary
-- `POST /summary/{patient_id}` — regenerate summary
+- `GET /summary/{patient_id}` — return stored summary as `{ "summary": "markdown string" }`
+- `POST /summary/{patient_id}` — regenerate summary, returns `{ "summary": "markdown string" }`
 - `GET /timeline/{patient_id}` — return timeline events sorted by date
+- `GET /timeline/{patient_id}/{event_id}` — return a single timeline event detail
 
 ### Chat
 - `POST /chat`
@@ -247,12 +377,15 @@ ChromaDB serves two distinct purposes:
   Request:
   {
     "patient_id": "uuid",
+    "chat_session_id": "uuid",
     "message": "string"
   }
 
   Response:
   {
     "response": "string",
+    "grounding_retried": false,
+    "retry_count": 0,
     "citations": [
       {
         "filename": "string",
@@ -264,73 +397,148 @@ ChromaDB serves two distinct purposes:
 
 Note: conversation history is managed server-side via ChromaDB. The frontend does not need to pass history on each request.
 
+- `GET /patients/{patient_id}/chat-sessions` — list sessions for patient
+- `POST /patients/{patient_id}/chat-sessions` — create session `{ title? }`, returns `{ chat_session_id }`. Title defaults to "New Chat"; LLM-generated title is applied after the first exchange.
+- `PATCH /patients/{patient_id}/chat-sessions/{chat_session_id}` — rename session `{ title }` (sets `title_auto_generated: false`)
+- `DELETE /patients/{patient_id}/chat-sessions/{chat_session_id}` — delete one session and only its memory/state/messages
+- `GET /chat/messages/{patient_id}/{chat_session_id}` — return ordered message log for display (from `./data/patients/{slug}/chats/`)
+- `GET /chat/state/{patient_id}/{chat_session_id}` — return conversation state capsule for one session
+- `POST /chat/reset/{patient_id}/{chat_session_id}` — clear memory + reset state for one session
+- `POST /chat/rebuild-state/{patient_id}/{chat_session_id}` — recompute state from stored exchanges for one session
+
 ### Config
 - `GET /config` — get current model settings
-- `POST /config` — update `{ model_name, embedding_model }`
+- `POST /config` — update any subset of config fields
 - `GET /models` — list available Ollama models
 
 ---
 
-## File Structure
+## File Structure Example
 
 ```
 openhealth/
+├── docker-compose.yml
+├── README.md
 ├── backend/
 │   ├── ai.py           # Ollama HTTP client (embeddings + chat)
 │   ├── config.py       # config.json read/write with defaults
-│   ├── documents.py    # text extraction, OCR, chunking, patient.md I/O
+│   ├── documents.py    # text extraction, OCR, chunking, patient.md I/O, JSON extraction; scans uploads/ subfolder, excludes *.extracted
 │   ├── jobs.py         # async ingestion pipeline, background job tracker
 │   ├── main.py         # FastAPI routes
 │   ├── memory.py       # ChromaDB wrapper (doc chunks + chat history collections)
-│   ├── patients.py     # JSON persistence for patients, docs, timeline, summaries
+│   ├── patients.py     # JSON persistence for patient index, patient.json, chat message logs
 │   ├── timeline.py     # LLM-based timeline extraction
-│   └── requirements.txt
+│   ├── watcher.py      # watchdog-based watcher; monitors uploads/ subfolder per patient; surfaces jobs via /status/{job_id}
+│   ├── Dockerfile
+│   └── requirements.txt  # includes: fastapi, uvicorn, pymupdf, pytesseract, chromadb, watchdog
 ├── frontend/
-│   └── src/
-│       ├── api.js
-│       ├── pages/
-│       │   ├── Home.jsx
-│       │   ├── Patient.jsx
-│       │   └── Settings.jsx
-│       └── components/
-│           ├── Chat.jsx
-│           ├── Citation.jsx
-│           ├── IngestionProgress.jsx
-│           ├── SummaryModal.jsx
-│           └── Timeline.jsx
-├── config.json
-└── start.sh / start.ps1
+│   ├── app/
+│   │   ├── page.tsx             # Home
+│   │   ├── patient/[id]/
+│   │   │   ├── page.tsx         # Patient
+│   │   │   └── settings/
+│   │   │       └── page.tsx     # Patient Settings
+│   │   └── layout.tsx           # Root layout with header
+│   ├── components/
+│   │   ├── Header.tsx
+│   │   ├── SettingsModal.tsx
+│   │   ├── UploadArea.tsx        # drag-and-drop / file picker, calls POST /patients/{id}/upload
+│   │   ├── Chat.tsx
+│   │   ├── Citation.tsx
+│   │   ├── DeletePatientModal.tsx  # confirmation modal with per-item checkboxes before delete
+│   │   ├── IngestionProgress.tsx
+│   │   ├── PatientSettings.tsx   # patient settings form (rename, overrides, regenerate summary, delete)
+│   │   ├── SummaryPanel.tsx      # renders summary markdown string as HTML
+│   │   └── Timeline.tsx
+│   ├── lib/
+│   │   └── api.ts
+│   ├── Dockerfile
+│   ├── package.json
+│   └── tailwind.config.ts
+└── data/                        # bind-mounted volume (git-ignored)
+    ├── config/
+    │   └── config.json
+    ├── patients.json             # thin patient index (includes document_count)
+    ├── memory_db/
+    └── patients/
+        └── mary-johnson/
+            ├── patient.json
+            ├── patient.md
+            ├── uploads/
+            └── chats/
 ```
+
+**Project layout** keeps the root clean. All runtime files (data, config, vector store) live inside a single `./data/` directory which is bind-mounted into the containers and git-ignored. The root contains only `docker-compose.yml`, `README.md`, and the `backend/` / `frontend/` source folders.
+
+```
+openhealth/          ← cloned repo root
+├── docker-compose.yml
+├── README.md
+├── backend/
+├── frontend/
+└── data/            ← bind-mounted volume (git-ignored)
+    ├── config/
+    │   └── config.json
+    ├── patients.json    ← thin patient index
+    ├── memory_db/
+    └── patients/
+        └── mary-johnson/
+            ├── patient.json   ← per-patient data
+            ├── patient.md     ← generated record
+            ├── uploads/       ← source files go here
+            └── chats/         ← session message logs
+```
+
 
 ---
 
 ## Data Storage
 
-```
-~/openhealth_data/
-├── patients.json               # all patient records, documents, timeline, summaries
-└── memory_db/                  # ChromaDB vector store
-    ├── patient_{id}_docs/      # document chunks per patient
-    └── patient_{id}_chat/      # chat history per patient
+All runtime data lives under `./data/` in the project root, which is bind-mounted into the containers and git-ignored. This keeps the repo root clean for non-developer users.
 
-<patient folder>/
-└── patient.md                  # generated — full concatenated record with document boundaries
+`patients.json` is a thin index (id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at). All patient-specific data lives in a `patient.json` file inside each patient's own folder under `./data/patients/`, preventing any cross-patient data from ever occupying the same structure.
+
+```
+./data/
+├── config/
+│   └── config.json                      # editable before or after startup
+├── patients.json                         # index: id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at
+├── memory_db/                            # ChromaDB vector store
+│   ├── {patient_id}_docs/               # document chunks per patient
+│   └── {patient_id}_chat_{session_id}/  # semantic chat memory per session
+└── patients/
+    └── mary-johnson/                    # auto-created from patient name slug
+        ├── patient.json                 # per-patient data: documents, timeline, summary, sessions, states
+        ├── patient.md                   # generated — full concatenated record
+        ├── uploads/                     # source files uploaded via UI or placed manually
+        │   ├── discharge_summary_jan2026.pdf
+        │   └── discharge_summary_jan2026.pdf.extracted  # cached extracted plain text
+        └── chats/
+            └── {session_id}.json        # ordered message log for UI display
 ```
 
-`patient.md` is written to the same folder as the source documents and excluded from `.gitignore` as it contains personal medical data.
+**`.extracted` files** are written alongside each source file inside `uploads/` during ingestion. They cache the plain-text extraction (PyMuPDF, OCR, or LLM output) so that `patient.md` can be regenerated instantly on refresh without re-running OCR or LLM extraction passes. If a source file is detected as changed (mtime or size differs from the stored document record), its `.extracted` sidecar is overwritten in place before re-processing.
+
+`patient.md`, `patient.json`, and `.extracted` files are excluded from git as they contain personal medical data. Patient folders are created automatically by the backend when a patient is added via the UI. Advanced users can also drop files directly into a patient's `uploads/` folder; the background watcher will detect them.
 
 ---
 
 ## Configuration
 
+Config is stored at `./data/config/config.json` (inside the mounted volume). It is created with defaults on first run if absent, and is editable directly or via the Settings UI.
+
 ```json
 {
-  "model": "medgemma1.5:latest",
+  "model": "MedAIBase/MedGemma1.5:4b",
   "embedding_model": "nomic-embed-text",
   "chunk_size": 900,
   "chunk_overlap": 100,
   "memory_results": 15,
-  "data_path": "~/openhealth_data"
+  "context_window_tokens": 120000,
+  "data_path": "/data",
+  "ollama_base_url": "http://ollama:11434",
+  "grounding_enabled": true,
+  "grounding_max_retries": 2
 }
 ```
 
@@ -356,6 +564,36 @@ Per-document timeline calls can only see one document at a time, missing context
 **Why FastAPI over direct React → Ollama calls?**
 Document processing (PyMuPDF, OCR, chunking) requires Python. ChromaDB's Python client is the most mature interface. Async ingestion requires a server-side job runner.
 
+**Why a server-managed conversation state capsule?**
+MedGemma 1.5 is not optimized for multi-turn chat. Persisting a compact rolling summary, active topics, and open questions allows each turn to be reconstructed deterministically without depending on latent model memory.
+
+**Why session-scoped memory for a single patient?**
+Users often need separate threads (for example, medication questions vs billing/admin notes) over the same records. Session-scoped storage prevents conceptual bleed and ensures each chat remains coherent to its own intent.
+
+**Why verify responses after generation?**
+Multi-turn drift is more likely when the model must carry context across many turns. A post-generation grounding check enforces that key claims are supported by `patient.md` or retrieved snippets, and can trigger a constrained retry when unsupported claims are detected.
+
+**Why avoid sending raw full chat logs every turn?**
+Large raw logs increase noise and context collisions. Structured state + semantic retrieval provides continuity with less token overhead and more stable behavior.
+
+**Why per-patient JSON record files instead of one `patients.json`?**
+A single file accumulates all patients' documents, timelines, and summaries, growing unbounded and requiring full rewrites on every change. Separate files keep I/O scoped per patient, prevent cross-patient data from ever occupying the same structure, and make corruption recovery easier.
+
+**Why incremental ingestion by default?**
+Re-processing all documents on every file addition is wasteful when a patient already has many files. Incremental ingestion appends only the new documents, keeping ingestion time proportional to the number of new files rather than the total. Full rebuild remains available for cases where document order, extraction quality, or embedding consistency needs resetting.
+
+**Why token-count before inference rather than catching Ollama errors?**
+Catching a context-length error from Ollama means a full LLM round-trip was wasted. A pre-flight character-based approximation (`len(text) / 4`) is fast, free, and deterministic. It may occasionally underestimate token count for unusual scripts, so the `context_window_tokens` default is set conservatively at 120,000 (below the model's 128K limit). Users can adjust this in Settings if needed.
+
+**Why `.extracted` sidecar files?**
+Re-running OCR or LLM extraction on every `patient.md` rebuild is slow and expensive. Caching extracted text alongside the source file makes rebuilds near-instant and lets the system detect changes by comparing file modification times.
+
+**Why uploads/ subfolder instead of patient root?**
+Separating source files from app-generated files (`patient.json`, `patient.md`) eliminates the need for an exclusion list. The watcher monitors `uploads/` only, so writes to app-generated files never trigger spurious re-ingestion. The only exclusion still needed is `*.extracted` within `uploads/`, since those are cached extraction outputs placed alongside source files during ingestion.
+
+**Why no authentication?**
+This is a local, single-user-trusted application. Docker Compose binds to localhost only and the data volume is on the user's own machine. A separate SaaS project will handle multi-user auth and access control.
+
 ---
 
 ## System Prompts
@@ -371,15 +609,49 @@ You are not limited to only what is in the documents — use your medical knowle
 to help the user understand, interpret, and act on what the records contain.
 ```
 
+### Conversation state update
+```
+You are maintaining a compact clinical conversation state for a medical assistant.
+Given the latest user message, assistant response, and prior state:
+1) Update rolling_summary in 4-8 sentences
+2) Update active_topics as short phrases
+3) Update open_questions with unresolved items only
+Keep the state factual, concise, and grounded in the conversation and records.
+Do not invent patient facts.
+```
+
+### Grounding verifier
+```
+You are a strict grounding verifier.
+Given a draft assistant answer and source context (patient.md plus retrieved snippets),
+label each major claim as SUPPORTED, PARTIAL, or UNSUPPORTED.
+Return:
+- a corrected answer that removes or qualifies unsupported claims
+- citations for every supported claim
+- an uncertainty note where evidence is insufficient
+Do not add new clinical facts that are not in evidence.
+```
+
 ### Summary generation
 ```
 You are a medical summarization assistant. Be precise and factual.
-Based on the following medical documents, provide:
-1. A 3-4 sentence overview of the patient's medical history
-2. Current active conditions
-3. Current medications
-4. Recent procedures or hospitalizations
-5. Key concerns or patterns
+Based on the following medical documents, produce a markdown-formatted summary
+using the exact section headers below. Keep each section concise.
+
+## Overview
+3-4 sentences summarizing the patient's overall medical history.
+
+## Active Conditions
+List current diagnosed conditions.
+
+## Current Medications
+List medications with dosage where available.
+
+## Recent Procedures
+List recent procedures or hospitalizations.
+
+## Key Concerns
+Note patterns, gaps, or items that warrant attention.
 ```
 
 ### Timeline generation
@@ -390,13 +662,195 @@ For each event include: exact date, one-line title, document type, source filena
 Do not infer or summarize — only extract what is explicitly stated.
 ```
 
+### JSON extraction
+```
+You are a medical data extractor. You have been given the raw contents of a JSON file
+exported from a healthcare system. The structure and field names may be unfamiliar.
+Extract all clinically relevant information — diagnoses, medications, lab results,
+procedures, dates, provider notes, and any other health-related data — and present it
+as clear, readable plain text. Do not include technical metadata, IDs, or system fields
+unless they carry clinical meaning. Preserve all dates and values exactly as they appear.
+```
+
 ---
 
 ## Key Behaviors
 
-1. **Async ingestion** — ingestion never blocks the UI. Always runs as a background job. Frontend polls every 2 seconds.
-2. **New file detection** — on patient view load, check folder for new files and show a banner if found.
+1. **Async ingestion** — ingestion never blocks the UI. Always runs as a background job. Upload returns a `job_id` directly; watcher-triggered jobs are discovered via `GET /patients/{id}/active-job`. Frontend polls every 2 seconds.
+2. **New file detection** — the `watchdog` watcher monitors each patient's `uploads/` subfolder. When new files appear (from manual copy, not upload), an incremental ingestion job starts automatically and is surfaced to the UI via `GET /patients/{id}/active-job` polling.
 3. **Citation format** — always at the bottom of every AI response, never inline.
-4. **Context window fallback** — if `patient.md` exceeds the model's context window, fall back to ChromaDB document chunk retrieval.
+4. **Context window fallback** — before each inference call the backend estimates `patient.md` token count using `len(text) / 4` (character-based approximation). If the estimate exceeds `context_window_tokens` from config (default `120000`, a safe margin below the model's 128K limit), it falls back to ChromaDB document chunk retrieval. This is deterministic and avoids wasted round-trips from Ollama context-length errors.
 5. **Chat history persistence** — every exchange is embedded and stored in ChromaDB. Relevant history is retrieved semantically on each new message.
 6. **Offline** — no network calls except to localhost Ollama.
+7. **Stateless turn reconstruction** — every answer is generated from an explicit context packet (patient record + retrieved memory + state capsule), never by trusting model-native multi-turn continuity.
+8. **Grounding gate** — when `grounding_enabled: true`, each response is verified. If unsupported claims are found, the backend retries up to `grounding_max_retries` times (default 2). If retries are exhausted, the best available response is returned with uncertainty markers. The response includes `grounding_retried: true` and `retry_count` when retries occurred; the UI displays a subtle "Answer was refined" indicator attached to the assistant message bubble when `grounding_retried` is true.
+9. **Session isolation** — all chat memory/state reads and writes are scoped by `{ patient_id, chat_session_id }`; no cross-session retrieval.
+10. **Session reset control** — users can reset one chat session without affecting other sessions for the same patient.
+11. **Auto-titled sessions** — session title is set to "New Chat" on creation; after the first exchange the backend generates a descriptive title via LLM. User renames lock the title permanently.
+12. **Message log for display** — ordered messages are written to `./data/patients/{slug}/chats/` on every turn and read back directly for UI rendering; ChromaDB is used only for semantic retrieval, not display.
+13. **No authentication** — local single-user app; no login required.
+
+---
+
+## UI Layout
+
+### Global Header
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  OpenHealth v1                                                          ⚙  │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+Present on every page. The cog icon (⚙) opens the Settings modal as an overlay. No separate settings page or route.
+
+### Settings Modal
+
+Slides in as a right-side panel or centered modal when the cog is clicked. Displays and saves all values from `./data/config/config.json` via `GET /config` and `POST /config`.
+
+- Model selector (dropdown populated from `GET /models`)
+- Embedding model selector (dropdown populated from `GET /models`)
+- Chunk size input (number)
+- Chunk overlap input (number)
+- Grounding enabled toggle (on by default)
+- Grounding max retries input (number, default 2)
+- Context window tokens input (number, default 120000)
+- Ollama base URL override (text input)
+
+Changes take effect immediately on save. The modal closes on save or on click-outside / Escape.
+
+### Patient Page
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│  OpenHealth v1                                                            ⚙   │
+└────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────┬──────────────────────────────────────┬──────────────────────┐
+│  Left Sidebar    │  Main — Chat                         │  Right Sidebar       │
+│──────────────────│──────────────────────────────────────│──────────────────────│
+│ Patients         │  "Medication review"  [rename]       │  Summary             │
+│  ▸ Mom      ←    │  ─────────────────────────────────── │  ──────────────────  │
+│    Dad           │                                      │  [structured text]   │
+│    + Add Patient │  [message bubbles, scrollable]       │                      │
+│                  │                                      │  Timeline            │
+│ Chats            │                                      │  ──────────────────  │
+│  + New Chat      │                                      │  ● 2026-01-15        │
+│  ───────────     │                                      │    Discharge         │
+│  ▸ Medication    │                                      │  ● 2026-03-04        │
+│    review        │                                      │    Lab results       │
+│    Follow-up     │                                      │  ● 2026-04-10        │
+│    questions     │                                      │    Cardiology appt   │
+│                  │  [text input]             [Send]     │                      │
+└──────────────────┴──────────────────────────────────────┴──────────────────────┘
+```
+
+- **Left sidebar**: patient selector (all patients listed, active highlighted) followed by the chat/session list for the selected patient. "New Chat" button at the top of the list. A settings icon next to the active patient name links to `/patient/[id]/settings`.
+- **Main area**: active chat session. Shows session title with inline rename on click. Message bubbles for user and assistant. Citations rendered below each assistant message. Text input fixed at the bottom.
+- **Right sidebar**: summary rendered as markdown-to-HTML in a scrollable panel (`SummaryPanel.tsx`). The summary LLM output uses `##` markdown headers for each section — Overview, Active Conditions, Medications, Recent Procedures, Key Concerns. Frontend converts the stored markdown string to HTML for display and must sanitize the rendered HTML before injection. Vertical timeline below the summary panel (scrollable, chronological, oldest at top). Timeline is informational display only — events are not clickable.
+
+### Home Page
+
+Simple patient list with name, document count, last ingested date, and an "Open" button per patient. "Add Patient" opens a modal: user enters name, backend creates the folder slug automatically, then the modal transitions to a file upload step (drag-and-drop or file picker). The user can skip the upload step and upload files later from the Patient page. Upload completion triggers ingestion and redirects to the Patient page.
+
+### Settings Page
+
+Settings are accessed via the cog icon (\u2699) in the global header and open as an overlay panel. There is no dedicated settings route. See **Settings Modal** above for field details.
+
+### Patient Settings Page (`/patient/[id]/settings`)
+
+A dedicated page for per-patient configuration, accessible via a settings icon or link on the Patient page. Contains:
+
+- **Rename patient** — editable name field. On save, calls `PATCH /patients/{id}` with `{ name }`. Backend updates the `patients.json` entry; the folder slug is not renamed (slug is permanent once created).
+- **Multi-turn memory threshold** — `memory_results` override for this patient (number of past exchanges retrieved per turn). Defaults to the global `memory_results` from config if not set.
+- **Context window override** — `context_window_tokens` override for this patient. Defaults to global config value if not set.
+- **Regenerate summary** — button that calls `POST /summary/{patient_id}` and displays a loading state while the job runs.
+- **Delete patient** — opens the same confirmation modal with per-item checkboxes as the home-page delete flow.
+
+Per-patient overrides (`memory_results_override`, `context_window_tokens_override`) are stored in the patient's `patient.json`. When present, they take precedence over global config values for that patient only. When absent or `null`, global config is used.
+
+# UX Principles
+
+- Calm tone
+- No alarmist language
+- Always cite source
+- Clear distinction between facts vs interpretation
+- Plain-English default
+
+# Branding, Styling, Theme
+
+Create styling guidelines.
+
+Prototype implementation rule:
+- Even for early mock screens and prototypes, use a shared `app.css` file as the primary global stylesheet entry point
+- Define all theme colors as CSS variables in `app.css`
+- Do not hardcode hex values directly in components or one-off mock styles
+- Color changes during prototyping should be handled by updating variables first, so visual direction can pivot quickly without refactoring screens
+
+## Visual Direction (Light Theme)
+- Tone: calm, supportive, confident
+- Theme baseline: light-first with high readability
+- Visual style: clean clinical utility with warm accents (not sterile, not playful)
+
+## Color Tokens (Initial)
+
+| Token | CSS Variable | Value | Usage |
+|---|---|---|---|
+| Background | `--color-background` | `#F8F9FA` | Page background |
+| Surface | `--color-surface` | `#FFFFFF` | Cards, panels |
+| Surface Elevated | `--color-surface-elevated` | `#F1F3F5` | Hover states, sidebars |
+| Border | `--color-border` | `#E5E7EB` | Dividers, card outlines |
+| Text Primary | `--color-text-primary` | `#1A1D21` | Body text, headings |
+| Text Secondary | `--color-text-secondary` | `#6B7280` | Labels, metadata, captions |
+| Text Muted | `--color-text-muted` | `#9CA3AF` | Placeholder, disabled |
+| Primary | `--color-primary` | `#2E7D6B` | Buttons, active states, links |
+| Primary Hover | `--color-primary-hover` | `#245F54` | Button hover |
+| Primary Light | `--color-primary-light` | `#E6F2EF` | Highlight backgrounds |
+| Success | `--color-success` | `#16A34A` | Completion states |
+| Warning | `--color-warning` | `#D97706` | Needs attention |
+| Error | `--color-error` | `#DC2626` | Errors, failures |
+
+All values are starting points — adjust by updating CSS variables in `app.css` only.
+
+Implementation requirement:
+- Map these tokens to CSS custom properties in `app.css` (example naming: `--color-background`, `--color-surface`, `--color-text-primary`, `--color-primary`)
+- Screens, components, and mock layouts must consume the variables rather than raw color literals
+
+Accessibility targets:
+- WCAG 2.1 AA contrast for text and controls
+- Do not use color alone to communicate risk or urgency
+
+## Typography
+
+| Role | Family | Weight | Size |
+|---|---|---|---|
+| UI base | Inter, system-ui, sans-serif | 400 | 16px |
+| Heading H1 | Inter | 700 | 28px |
+| Heading H2 | Inter | 600 | 22px |
+| Heading H3 | Inter | 600 | 18px |
+| Label / Caption | Inter | 500 | 13px |
+| Code / mono | JetBrains Mono, ui-monospace, monospace | 400 | 14px |
+
+Inter is loaded via `next/font` (no external CDN call — consistent with offline-first requirement). Line height: 1.6 for body, 1.2 for headings.
+
+## Layout and Components
+- 12-column desktop grid, 4-column mobile grid
+- Card-based information hierarchy for Daily Brief, What Changed, and Timeline modules
+- Sticky top navigation with patient context and quick upload action
+- Timeline entries must prioritize date, event type, and source link visibility
+
+Core component states:
+- Upload status chips: `Processing`, `Ready`, `Needs Review`
+- Confidence indicator: sentence/document confidence shown with neutral UI, not alarmist color spikes
+- Citation anchors: sentence-level references with hover/focus highlight in document preview
+
+## Motion and Interaction
+- Use subtle, purposeful motion only:
+  - Staggered card reveal on dashboard load (100-180ms offsets)
+  - Smooth expand/collapse for timeline details
+  - Gentle highlight transition for newly detected changes
+- Respect `prefers-reduced-motion`
+
+## Trust and Safety UI Cues
+- Separate "Facts from source" and "AI interpretation" in all summary views
+- Show uncertainty explicitly (e.g., "Possible medication change - please confirm")
+- Require user confirmation for ambiguous medication matches and multi-date selection
