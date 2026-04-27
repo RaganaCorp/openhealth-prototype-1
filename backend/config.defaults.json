@@ -1,0 +1,15 @@
+{
+  "model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
+  "embedding_model": "nomic-embed-text",
+  "embed_timeout_seconds": 60.0,
+  "chat_timeout_seconds": 600.0,
+  "meta_timeout_seconds": 15.0,
+  "chunk_size": 900,
+  "chunk_overlap": 100,
+  "memory_results": 15,
+  "context_window_tokens": 120000,
+  "data_path": "/data",
+  "ollama_base_url": "http://127.0.0.1:11434",
+  "grounding_enabled": true,
+  "grounding_max_retries": 2
+}

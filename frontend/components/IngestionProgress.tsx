@@ -1,0 +1,138 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+import { getJobStatus, type JobStatus } from "@/lib/api";
+
+type IngestionProgressProps = {
+  jobId: string;
+  onResolved?: (job: JobStatus) => void | Promise<void>;
+};
+
+export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps) {
+  const [job, setJob] = useState<JobStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const resolvedRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const nextJob = await getJobStatus(jobId);
+        if (cancelled) {
+          return;
+        }
+
+        setJob(nextJob);
+        if (nextJob.status !== "running" && onResolved && !resolvedRef.current) {
+          resolvedRef.current = true;
+          await onResolved(nextJob);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Could not load job status");
+        }
+      }
+    }
+
+    resolvedRef.current = false;
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [jobId, onResolved]);
+
+  if (error) {
+    return <div className="status-error">{error}</div>;
+  }
+
+  if (!job) {
+    return <div className="status-chip">Checking ingestion status…</div>;
+  }
+
+  const safeTotal = Math.max(job.total, 1);
+  const percent = Math.round((job.processed / safeTotal) * 100);
+  const tone = job.status === "failed" ? "status-chip-error" : job.status === "complete" ? "status-chip-success" : "status-chip";
+  const phaseLabels: Record<string, string> = {
+    queued: "Queued",
+    loading: "Loading patient record",
+    processing_files: "Extracting and embedding files",
+    rebuilding_patient_md: "Rebuilding patient document",
+    generating_timeline: "Generating timeline",
+    generating_summary: "Generating summary",
+    saving: "Saving updates",
+    complete: "Ready",
+    failed: "Needs Review",
+  };
+
+  const phaseText = phaseLabels[job.phase ?? ""];
+  const runningText = phaseText
+    ? `${phaseText}${job.current_file ? ` (${job.current_file})` : ""}`
+    : `Processing ${job.current_file ?? "queued files"}`;
+
+  const phaseStartedAtMs = job.phase_started_at ? Date.parse(job.phase_started_at) : NaN;
+  const phaseElapsedMs = Number.isFinite(phaseStartedAtMs) ? Math.max(0, Date.now() - phaseStartedAtMs) : 0;
+  const totalStartedAtMs = Date.parse(job.started_at);
+  const totalElapsedMs = Number.isFinite(totalStartedAtMs) ? Math.max(0, Date.now() - totalStartedAtMs) : 0;
+
+  const phaseWarningThresholdMs: Record<string, number> = {
+    loading: 10_000,
+    processing_files: 45_000,
+    rebuilding_patient_md: 15_000,
+    generating_timeline: 40_000,
+    generating_summary: 40_000,
+    saving: 10_000,
+  };
+
+  const activeThreshold = job.phase ? phaseWarningThresholdMs[job.phase] : undefined;
+  const isPhaseSlow = job.status === "running" && !!activeThreshold && phaseElapsedMs > activeThreshold;
+
+  function formatDuration(ms: number): string {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(seconds / 60);
+    const remSeconds = seconds % 60;
+    return minutes > 0 ? `${minutes}m ${remSeconds}s` : `${remSeconds}s`;
+  }
+
+  return (
+    <div className="rounded-[22px] border border-border/80 bg-surface-elevated p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-text-primary">Document ingestion</p>
+          <p className="mt-1 text-sm text-text-secondary">
+            {job.status === "running" ? runningText : job.status === "complete" ? "Ready" : "Needs Review"}
+          </p>
+        </div>
+        <span className={tone}>{job.status === "running" ? "Processing" : job.status === "complete" ? "Ready" : "Needs Review"}</span>
+      </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-background">
+        <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${job.status === "complete" ? 100 : percent}%` }} />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-text-secondary">
+        <span>
+          {job.processed} of {job.total} files processed
+        </span>
+        {job.status === "running" ? (
+          <span>
+            Phase elapsed {formatDuration(phaseElapsedMs)} · Total elapsed {formatDuration(totalElapsedMs)}
+          </span>
+        ) : null}
+        {job.error ? <span className="text-error">{job.error}</span> : null}
+      </div>
+
+      {isPhaseSlow ? (
+        <div className="mt-2 text-xs text-error">
+          This step is taking longer than usual. The model may still be working.
+        </div>
+      ) : null}
+    </div>
+  );
+}

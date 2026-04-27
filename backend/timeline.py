@@ -1,0 +1,872 @@
+"""
+LLM-based timeline and summary generation.
+Both functions receive the full patient.md text and call Ollama once.
+JSON responses are parsed from code-fenced LLM output.
+"""
+
+import json
+import logging
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+import ai
+
+_logger = logging.getLogger("uvicorn.error")
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+_TIMELINE_PROMPT = """\
+You are a medical timeline extractor.
+Extract every medical event from the following records as a chronological list.
+For each event include: exact date, one-line title, document type, source filename.
+Do not infer or summarize — only extract what is explicitly stated.
+
+Return your answer as a JSON array with this exact structure:
+[
+    {{
+    "date": "YYYY-MM-DD or as stated",
+    "title": "one-line event title",
+    "summary": "one sentence summary",
+    "document_type": "lab result | discharge summary | imaging | prescription | clinical note | unknown",
+    "source_filename": "filename.pdf"
+    }}
+]
+
+Wrap the JSON in a ```json ... ``` code fence.
+
+RECORDS:
+{patient_md}
+"""
+
+_EXTRACTION_PASS1_PROMPT = """\
+You are a clinical data extractor. From the medical records below, extract structured lists of facts.
+
+Return ONLY a JSON object wrapped in a ```json ... ``` code fence. Do not write prose.
+Extract only what is explicitly stated in the records — do not infer or add details not present.
+
+{{
+  "demographics": {{
+    "age": "value or null",
+    "sex": "value or null"
+  }},
+  "conditions": ["condition name", ...],
+  "medications": ["Drug name dose frequency", ...],
+  "procedures": ["procedure description (date if available)", ...],
+  "allergies": ["allergy description", ...],
+  "key_labs": ["test name: value (date if available)", ...],
+  "concerns": ["clinical concern or notable finding", ...]
+}}
+
+If a category has no data in the records, return an empty array (or null for demographics fields).
+
+RECORDS:
+{patient_md}
+"""
+
+_SUMMARY_PROSE_PROMPT = """\
+You are a medical summarization assistant. Write a concise, clinically useful patient summary.
+
+The following structured data was pre-extracted from the patient's records.
+Use these facts as the authoritative basis for each section.
+Do not contradict or omit items listed below. Do not add facts not present here.
+
+{structured_data}
+
+Write the summary using exactly these five section headers in this order.
+
+## Overview
+3-4 sentences summarizing the patient's overall medical history and current status.
+
+## Active Conditions
+List current diagnosed conditions as bullet points.
+
+## Current Medications
+List current medications with dose/frequency when available.
+
+## Recent Procedures
+List recent procedures, hospitalizations, or key visits.
+
+## Key Concerns
+Note risks, trends, missing data, or follow-up needs.
+
+Rules:
+- Output only markdown, no preamble and no trailing notes.
+- Use exactly the five section headers shown above in the same order.
+- Do not repeat sentences or duplicate findings.
+- If a section truly has no data (the pre-extracted lists above are empty for that category),
+  write "No clear evidence in provided records.".
+"""
+
+_SUMMARY_REPAIR_PROMPT = """\
+You are editing a noisy clinical summary.
+Rewrite it into clean markdown using exactly these headers and this order:
+
+## Overview
+## Active Conditions
+## Current Medications
+## Recent Procedures
+## Key Concerns
+
+Rules:
+- Keep only clinically relevant information.
+- Remove duplication and repetitive text.
+- Keep each section concise.
+- Do not add facts not present in the draft.
+- If a section has no evidence, write "No clear evidence in provided records.".
+
+DRAFT SUMMARY:
+{draft_summary}
+"""
+
+_JSON_EXTRACTION_PROMPT = """\
+You are a medical data extractor. You have been given the raw contents of a JSON file
+exported from a healthcare system. The structure and field names may be unfamiliar.
+Extract all clinically relevant information — diagnoses, medications, lab results,
+procedures, dates, provider notes, and any other health-related data — and present it
+as clear, readable plain text. Do not include technical metadata, IDs, or system fields
+unless they carry clinical meaning. Preserve all dates and values exactly as they appear.
+
+JSON CONTENT:
+{json_content}
+"""
+
+_STATE_UPDATE_PROMPT = """\
+You are maintaining a compact clinical conversation state for a medical assistant.
+Given the latest user message, assistant response, and prior state, update the state.
+
+Prior state:
+{prior_state}
+
+Latest user message:
+{user_message}
+
+Latest assistant response:
+{assistant_response}
+
+Return updated state as JSON wrapped in a ```json ... ``` code fence:
+{{
+  "rolling_summary": "4-8 sentence summary of the full conversation so far",
+  "active_topics": ["short phrase 1", "short phrase 2"],
+  "open_questions": ["unresolved question 1"]
+}}
+
+Keep the state factual, concise, and grounded in the conversation and records.
+Do not invent patient facts.
+"""
+
+_GROUNDING_PROMPT = """\
+You are a strict grounding verifier.
+Given a draft assistant answer and source context, verify that every major claim
+is supported by the source material.
+
+Source context:
+{context}
+
+Draft answer:
+{draft_answer}
+
+Label each major claim as SUPPORTED, PARTIAL, or UNSUPPORTED.
+Return a JSON object wrapped in a ```json ... ``` code fence:
+{{
+  "corrected_answer": "revised answer removing or qualifying unsupported claims",
+  "citations": [
+    {{"filename": "source_filename.pdf", "excerpt": "relevant excerpt"}}
+  ],
+  "uncertainty_note": "note about insufficient evidence, or empty string"
+}}
+
+Do not add new clinical facts not present in the source context.
+"""
+
+_AUTO_TITLE_PROMPT = """\
+Generate a short, descriptive title (5-7 words) for a medical conversation that started with:
+
+User: {first_user_message}
+Assistant: {first_assistant_response}
+
+Return only the title text, no punctuation, no quotes.
+"""
+
+_CLASSIFY_QUERY_PROMPT = """\
+Classify this medical query into one of these document types:
+lab result, discharge summary, imaging, prescription, clinical note, unknown
+
+Query: {query}
+
+Return only the document type label, nothing else.
+"""
+
+
+# ---------------------------------------------------------------------------
+# JSON parsing helper
+# ---------------------------------------------------------------------------
+
+def _parse_json_response(text: str, fallback: Any = None) -> Any:
+    """Extract JSON from a code-fenced LLM response."""
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    # Try parsing the whole response as JSON.
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        return fallback
+
+
+def _normalize_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _strip_markdown_fences(text: str) -> str:
+    fenced = re.search(r"```(?:markdown|md)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+    return text.strip()
+
+
+def _strip_reasoning_leakage(text: str) -> str:
+    cleaned = re.sub(r"<unused\d+>", "", text)
+
+    # Some model responses include planning/instructions before the real summary.
+    # Select the last plausible summary block starting at "## Overview".
+    starts = [m.start() for m in re.finditer(r"##\s+Overview", cleaned)]
+    if not starts:
+        return cleaned.strip()
+
+    for start in reversed(starts):
+        candidate = cleaned[start:].strip()
+        if _has_required_summary_sections(candidate):
+            return candidate
+
+    return cleaned[starts[-1]:].strip()
+
+
+def _normalize_summary_layout(text: str) -> str:
+    # Ensure headers start on their own lines.
+    text = re.sub(r"\s*(##\s)", r"\n\n\1", text).strip()
+    # Collapse excessive blank lines while preserving markdown readability.
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _extract_sentences(text: str) -> list[str]:
+    # Keep a simple splitter; robust enough for repetition detection.
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _has_required_summary_sections(text: str) -> bool:
+    required_headers = [
+        "## Overview",
+        "## Active Conditions",
+        "## Current Medications",
+        "## Recent Procedures",
+        "## Key Concerns",
+    ]
+    return all(h in text for h in required_headers)
+
+
+def _has_admin_noise(text: str) -> bool:
+    markers = [
+        "health care providers",
+        "patient contacts",
+        "guarantor",
+        "address:",
+        "powered by",
+        "allscripts",
+    ]
+    lowered = text.lower()
+    hits = sum(1 for marker in markers if marker in lowered)
+    return hits >= 2
+
+
+def _is_repetitive_text(text: str) -> bool:
+    sentences = _extract_sentences(text)
+    if len(sentences) < 12:
+        return False
+
+    norm = [_normalize_ws(s).lower() for s in sentences]
+    counts: dict[str, int] = {}
+    for s in norm:
+        counts[s] = counts.get(s, 0) + 1
+
+    max_repeat = max(counts.values()) if counts else 0
+    unique_ratio = len(counts) / max(len(norm), 1)
+
+    # Strong repetition signal from model loops.
+    return max_repeat >= 4 or unique_ratio < 0.55
+
+
+def _dedupe_repeated_sentences(text: str) -> str:
+    sentences = _extract_sentences(text)
+    seen: set[str] = set()
+    kept: list[str] = []
+    for sentence in sentences:
+        key = _normalize_ws(sentence).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(sentence)
+    return "\n\n".join(kept)
+
+
+def _prepare_summary_records(patient_md: str) -> str:
+    """Extract and compress clinically relevant sections from noisy exports."""
+    if not patient_md.strip():
+        return ""
+
+    # Strip only synthetic document boundary lines, not the document body.
+    cleaned = re.sub(r"(?mi)^={5,}\s*$", " ", patient_md)
+    cleaned = re.sub(r"(?mi)^={5,}\s*END:.*$", " ", cleaned)
+    cleaned = _normalize_ws(cleaned)
+
+    # Many CCD/portal exports use "top <Section Name>" markers.
+    section_iter = list(
+        re.finditer(
+            r"\btop\s+([A-Za-z][A-Za-z /&\-]{2,60})\s+(.*?)(?=\btop\s+[A-Za-z]|\Z)",
+            cleaned,
+            re.IGNORECASE,
+        )
+    )
+
+    if not section_iter:
+        return cleaned[:40000]
+
+    keep_sections = {
+        "reason for referral",
+        "assessments",
+        "problems",
+        "allergies and adverse reactions",
+        "medications",
+        "procedures",
+        "plan of treatment",
+        "results",
+        "vital signs",
+        "encounters",
+        "family history",
+        "social history",
+        "functional status",
+    }
+
+    drop_markers = [
+        "health care providers",
+        "patient contacts",
+        "document details",
+        "payers",
+        "insurance providers",
+        "guarantors",
+        "powered by allscripts",
+    ]
+
+    blocks: list[str] = []
+    for match in section_iter:
+        title = _normalize_ws(match.group(1))
+        body = _normalize_ws(match.group(2))
+        if not title or not body:
+            continue
+
+        title_lower = title.lower()
+        if title_lower not in keep_sections:
+            continue
+        if any(marker in body.lower() for marker in drop_markers):
+            continue
+
+        blocks.append(f"## {title}\n{body[:5000]}")
+
+    prepared = "\n\n".join(blocks).strip()
+    if not prepared:
+        return cleaned[:40000]
+
+    # Reduce obvious loops from duplicated CCD rows.
+    if _is_repetitive_text(prepared):
+        prepared = _dedupe_repeated_sentences(prepared)
+
+    return prepared[:50000]
+
+
+def _unique_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        normalized = _normalize_ws(item)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
+
+
+def _extract_top_section_blob(text: str, section_name: str) -> str:
+    pattern = re.compile(
+        rf"\btop\s+{re.escape(section_name)}\b\s+(.*?)(?=\btop\s+[A-Za-z]|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return _normalize_ws(m.group(1)) if m else ""
+
+
+def _extract_structured_fallback(patient_md: str) -> dict:
+    """Best-effort deterministic extraction when LLM pass-1 returns sparse output."""
+    if not patient_md.strip():
+        return {
+            "demographics": {"age": None, "sex": None},
+            "conditions": [],
+            "medications": [],
+            "procedures": [],
+            "allergies": [],
+            "key_labs": [],
+            "concerns": [],
+        }
+
+    cleaned = re.sub(r"(?mi)^={5,}.*$", " ", patient_md)
+    cleaned = _normalize_ws(cleaned)
+
+    # Demographics: common CCD style "Male Sex" / "Female Sex".
+    sex = None
+    if re.search(r"\bmale\s+sex\b", cleaned, re.IGNORECASE):
+        sex = "male"
+    elif re.search(r"\bfemale\s+sex\b", cleaned, re.IGNORECASE):
+        sex = "female"
+
+    # Conditions from ICD-like terms: "Condition Name (I10)".
+    condition_sources = " ".join(
+        part
+        for part in [
+            _extract_top_section_blob(cleaned, "Assessments"),
+            _extract_top_section_blob(cleaned, "Problems"),
+            cleaned,
+        ]
+        if part
+    )
+    cond_matches = re.findall(
+        r"([A-Z][A-Za-z0-9,\-'/ ]{2,80}?)\s*\(([A-TV-Z][0-9]{1,2}(?:\.[0-9A-Za-z]+)?)\)",
+        condition_sources,
+    )
+    blocked_condition_terms = {
+        "physical exam, annual",
+        "negative depression screening",
+        "need for flu vaccine",
+        "encounter for long-term (current) use of medications",
+    }
+    conditions = _unique_keep_order(
+        [name.strip(" -") for name, _code in cond_matches if name.strip(" -").lower() not in blocked_condition_terms]
+    )
+
+    # Medications from medication section and common "has been on X and now Y" phrasing.
+    med_blob = _extract_top_section_blob(cleaned, "Medications") or cleaned
+    med_matches = re.findall(
+        r"\b([A-Z][A-Za-z0-9\-/]{2,}(?:\s+[A-Z][A-Za-z0-9\-/]{1,}){0,2})\s+"
+        r"(\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|units))(?:\s+([A-Za-z0-9/.-]{1,20}))?",
+        med_blob,
+        flags=re.IGNORECASE,
+    )
+    medications = _unique_keep_order(
+        [
+            _normalize_ws(f"{name} {dose} {freq}" if freq else f"{name} {dose}")
+            for name, dose, freq in med_matches
+        ]
+    )
+    """Capture free-text med names even when doses are absent."""
+    free_text_meds = re.findall(
+        r"\b(?:has been on|now|restart)\s+([A-Za-z][A-Za-z0-9\-/]{2,})",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    common_meds = re.findall(
+        r"\b(cabergoline|bromocriptine|spironolactone|benicar|potassium|benzaonatate|benzonatate|levaquin|azithromycin|medrol|flonase|sudafed|mucinex)\b",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    medications = _unique_keep_order(medications + free_text_meds + common_meds)
+
+    # Procedures and key visits from procedures/encounters and known visit markers.
+    proc_blob = " ".join(
+        part
+        for part in [
+            _extract_top_section_blob(cleaned, "Procedures"),
+            _extract_top_section_blob(cleaned, "Encounters"),
+            cleaned,
+        ]
+        if part
+    )
+    procedure_keywords = [
+        "hospital discharge follow-up",
+        "covid-19 vaccine administered",
+        "referred to ortho",
+        "mri",
+        "ultrasound",
+        "ct",
+        "on cpap",
+    ]
+    procedures: list[str] = []
+    for kw in procedure_keywords:
+        if re.search(rf"\b{re.escape(kw)}\b", proc_blob, re.IGNORECASE):
+            procedures.append(kw)
+    procedures = _unique_keep_order(procedures)
+
+    # Allergies from allergy section.
+    allergy_blob = _extract_top_section_blob(cleaned, "Allergies and Adverse Reactions")
+    allergies = _unique_keep_order(
+        re.findall(r"\b(No Known Allergies|No Known Drug Allergies|[A-Z][A-Za-z0-9 ,\-/]{2,40} allergy)\b", allergy_blob, re.IGNORECASE)
+    )
+
+    # Labs from common analytes + numeric values.
+    key_labs = _unique_keep_order(
+        re.findall(
+            r"\b(?:A1c|HbA1c|AST|ALT|Potassium|K)\b[^\n]{0,30}?\b\d+(?:\.\d+)?\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    concerns: list[str] = []
+    concern_keywords = ["hypokalemia", "renal cancer", "morbid obesity", "right knee pain", "sleep apnea"]
+    lower = cleaned.lower()
+    for kw in concern_keywords:
+        if kw in lower:
+            concerns.append(kw)
+
+    return {
+        "demographics": {"age": None, "sex": sex},
+        "conditions": conditions[:30],
+        "medications": medications[:20],
+        "procedures": procedures[:20],
+        "allergies": allergies[:20],
+        "key_labs": key_labs[:20],
+        "concerns": _unique_keep_order(concerns)[:20],
+    }
+
+
+def _merge_structured(primary: dict, fallback: dict) -> dict:
+    """Merge pass-1 output with fallback extraction, preferring non-empty pass-1 fields."""
+    p_demo = primary.get("demographics") if isinstance(primary.get("demographics"), dict) else {}
+    f_demo = fallback.get("demographics") if isinstance(fallback.get("demographics"), dict) else {}
+
+    def _merged_list(name: str) -> list[str]:
+        p = primary.get(name) if isinstance(primary.get(name), list) else []
+        f = fallback.get(name) if isinstance(fallback.get(name), list) else []
+        return _unique_keep_order((p if p else []) + (f if not p else []))
+
+    return {
+        "demographics": {
+            "age": p_demo.get("age") if p_demo.get("age") not in [None, "", "unknown"] else f_demo.get("age"),
+            "sex": p_demo.get("sex") if p_demo.get("sex") not in [None, "", "unknown"] else f_demo.get("sex"),
+        },
+        "conditions": _merged_list("conditions"),
+        "medications": _merged_list("medications"),
+        "procedures": _merged_list("procedures"),
+        "allergies": _merged_list("allergies"),
+        "key_labs": _merged_list("key_labs"),
+        "concerns": _merged_list("concerns"),
+    }
+
+
+def _build_structured_input(data: dict) -> str:
+    """Format pass-1 extracted JSON into a readable block for the prose prompt."""
+    lines: list[str] = []
+
+    demo = data.get("demographics") or {}
+    age = demo.get("age") or "unknown"
+    sex = demo.get("sex") or "unknown"
+    lines.append(f"**Patient demographics**: age {age}, sex {sex}\n")
+
+    def _section(label: str, items: list) -> None:
+        if items:
+            lines.append(f"**{label}**:")
+            for item in items:
+                lines.append(f"- {item}")
+            lines.append("")
+        else:
+            lines.append(f"**{label}**: none recorded\n")
+
+    _section("Known Conditions", data.get("conditions") or [])
+    _section("Current Medications", data.get("medications") or [])
+    _section("Recent Procedures / Visits", data.get("procedures") or [])
+    _section("Allergies", data.get("allergies") or [])
+    _section("Key Lab Results", data.get("key_labs") or [])
+    _section("Clinical Concerns", data.get("concerns") or [])
+
+    return "\n".join(lines)
+
+
+def _inject_pass1_fallbacks(summary: str, structured: dict) -> str:
+    """
+    For any summary section that claims no evidence but pass-1 had items,
+    replace the placeholder with the extracted items as bullet points.
+    """
+    no_evidence = "no clear evidence in provided records"
+
+    replacements = [
+        ("## Active Conditions", structured.get("conditions") or []),
+        ("## Current Medications", structured.get("medications") or []),
+        ("## Recent Procedures", structured.get("procedures") or []),
+    ]
+
+    for header, items in replacements:
+        if not items:
+            continue
+        pattern = re.compile(
+            rf"({re.escape(header)}\n)(.*?)(?=\n## |\Z)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        def _replace(m: re.Match, _items: list = items) -> str:
+            body = m.group(2).strip()
+            if no_evidence in body.lower():
+                bullet_list = "\n".join(f"- {item}" for item in _items)
+                return f"{m.group(1)}{bullet_list}\n\n"
+            return m.group(0)
+
+        summary = pattern.sub(_replace, summary)
+
+    return summary
+
+
+def _ensure_summary_sections(text: str) -> str:
+    has_all = _has_required_summary_sections(text)
+    if has_all:
+        return text
+
+    # Fallback layout when model ignores format instructions.
+    return (
+        "## Overview\n"
+        f"{text.strip()}\n\n"
+        "## Active Conditions\n"
+        "No clear evidence in provided records.\n\n"
+        "## Current Medications\n"
+        "No clear evidence in provided records.\n\n"
+        "## Recent Procedures\n"
+        "No clear evidence in provided records.\n\n"
+        "## Key Concerns\n"
+        "No clear evidence in provided records."
+    )
+
+
+def _prune_summary_sections(text: str) -> str:
+    pattern = re.compile(
+        r"(?ms)^## (Overview|Active Conditions|Current Medications|Recent Procedures|Key Concerns)\n(.*?)(?=^## |\Z)"
+    )
+    matches = pattern.findall(text)
+    if not matches:
+        return text
+
+    banned_tokens = [
+        "provider",
+        "address",
+        "guarantor",
+        "phone",
+        "email",
+        "pharmacy",
+        "allscripts",
+        "powered by",
+        "staff",
+    ]
+
+    section_order = [
+        "Overview",
+        "Active Conditions",
+        "Current Medications",
+        "Recent Procedures",
+        "Key Concerns",
+    ]
+    sections: dict[str, str] = {name: "" for name in section_order}
+    for name, content in matches:
+        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        kept: list[str] = []
+        for line in lines:
+            lowered = line.lower()
+            if any(tok in lowered for tok in banned_tokens):
+                continue
+            if len(line) > 500:
+                continue
+            if line in {"1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.", "10."}:
+                continue
+            kept.append(line)
+
+        max_lines = 6 if name == "Overview" else 8
+        kept = kept[:max_lines]
+        if not kept:
+            sections[name] = "No clear evidence in provided records."
+        else:
+            sections[name] = "\n".join(kept)
+
+    rebuilt: list[str] = []
+    for name in section_order:
+        rebuilt.append(f"## {name}")
+        rebuilt.append(sections[name])
+        rebuilt.append("")
+    return "\n".join(rebuilt).strip()
+
+
+def _sanitize_summary_output(text: str) -> str:
+    cleaned = _strip_markdown_fences(text)
+    cleaned = _strip_reasoning_leakage(cleaned)
+    if _is_repetitive_text(cleaned):
+        cleaned = _dedupe_repeated_sentences(cleaned)
+    cleaned = _ensure_summary_sections(cleaned)
+    cleaned = _normalize_summary_layout(cleaned)
+    cleaned = _prune_summary_sections(cleaned)
+    # Guard against pathological long outputs from repetition loops.
+    return cleaned[:12000].strip()
+
+
+# ---------------------------------------------------------------------------
+# Public functions
+# ---------------------------------------------------------------------------
+
+async def generate_timeline(patient_id: str, patient_md: str) -> list[dict]:
+    """One LLM call over patient.md → list of timeline event dicts."""
+    if not patient_md.strip():
+        return []
+    prompt = _TIMELINE_PROMPT.format(patient_md=patient_md)
+    response = await ai.chat_complete([{"role": "user", "content": prompt}])
+    events_raw = _parse_json_response(response, fallback=[])
+    if not isinstance(events_raw, list):
+        return []
+
+    events: list[dict] = []
+    for ev in events_raw:
+        if not isinstance(ev, dict):
+            continue
+        events.append({
+            "id": str(uuid.uuid4()),
+            "patient_id": patient_id,
+            "document_id": None,
+            "date": ev.get("date", "unknown"),
+            "title": ev.get("title", ""),
+            "summary": ev.get("summary", ""),
+            "document_type": ev.get("document_type", "unknown"),
+            "source_filename": ev.get("source_filename", ""),
+        })
+    # Sort chronologically; put "unknown" dates at the end.
+    events.sort(key=lambda e: (e["date"] == "unknown", e["date"]))
+    return events
+
+
+async def generate_summary(patient_md: str) -> str:
+    """Two-pass LLM summary: Pass 1 extracts structured data, Pass 2 generates prose."""
+    if not patient_md.strip():
+        return ""
+
+    # Pass 1 — structured extraction from raw records.
+    # Use raw patient_md (not pre-filtered) so all clinical sections reach the model.
+    extract_prompt = _EXTRACTION_PASS1_PROMPT.format(patient_md=patient_md[:30000])
+    extract_response = await ai.chat_complete([{"role": "user", "content": extract_prompt}])
+    structured = _parse_json_response(extract_response, fallback={})
+    if not isinstance(structured, dict):
+        structured = {}
+    fallback_structured = _extract_structured_fallback(patient_md)
+    structured = _merge_structured(structured, fallback_structured)
+    _logger.info(
+        "summary extracted+fallback: conditions=%d meds=%d procedures=%d",
+        len(structured.get("conditions") or []),
+        len(structured.get("medications") or []),
+        len(structured.get("procedures") or []),
+    )
+
+    # Pass 2 — prose generation from pre-extracted facts.
+    structured_block = _build_structured_input(structured)
+    prose_prompt = _SUMMARY_PROSE_PROMPT.format(structured_data=structured_block)
+    prose_response = await ai.chat_complete([{"role": "user", "content": prose_prompt}])
+    summary = _sanitize_summary_output(prose_response)
+
+    # Fallback: if LLM dropped a section that had pass-1 data, inject items directly.
+    summary = _inject_pass1_fallbacks(summary, structured)
+
+    return summary
+
+
+async def extract_json_document(json_content: str) -> str:
+    """LLM-assisted plain-text extraction from provider JSON exports."""
+    prompt = _JSON_EXTRACTION_PROMPT.format(json_content=json_content)
+    return await ai.chat_complete([{"role": "user", "content": prompt}])
+
+
+async def update_conversation_state(
+    prior_state: dict | None,
+    user_message: str,
+    assistant_response: str,
+) -> dict:
+    """Refresh rolling_summary, active_topics, open_questions after each turn."""
+    prior_str = json.dumps(prior_state, indent=2) if prior_state else "{}"
+    prompt = _STATE_UPDATE_PROMPT.format(
+        prior_state=prior_str,
+        user_message=user_message,
+        assistant_response=assistant_response,
+    )
+    response = await ai.chat_complete([{"role": "user", "content": prompt}])
+    parsed = _parse_json_response(response, fallback={})
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "rolling_summary": parsed.get("rolling_summary", ""),
+        "active_topics": parsed.get("active_topics", []),
+        "open_questions": parsed.get("open_questions", []),
+        "last_updated_at": now,
+    }
+
+
+async def verify_grounding(
+    draft_answer: str,
+    context: str,
+) -> dict:
+    """
+    Verify grounding of draft_answer against context.
+    Returns { corrected_answer, citations, uncertainty_note }.
+    Falls back to original answer if parsing fails.
+    """
+    prompt = _GROUNDING_PROMPT.format(
+        context=context[:60000],  # guard against excessive context
+        draft_answer=draft_answer,
+    )
+    response = await ai.chat_complete([{"role": "user", "content": prompt}])
+    parsed = _parse_json_response(response, fallback=None)
+    if parsed and isinstance(parsed, dict) and "corrected_answer" in parsed:
+        return {
+            "corrected_answer": parsed.get("corrected_answer", draft_answer),
+            "citations": parsed.get("citations", []),
+            "uncertainty_note": parsed.get("uncertainty_note", ""),
+        }
+    return {
+        "corrected_answer": draft_answer,
+        "citations": [],
+        "uncertainty_note": "",
+    }
+
+
+async def generate_session_title(
+    first_user_message: str,
+    first_assistant_response: str,
+) -> str:
+    prompt = _AUTO_TITLE_PROMPT.format(
+        first_user_message=first_user_message,
+        first_assistant_response=first_assistant_response[:500],
+    )
+    title = await ai.chat_complete([{"role": "user", "content": prompt}])
+    return title.strip().strip('"').strip("'")[:80]
+
+
+def classify_query(query: str) -> str:
+    """
+    Keyword-based query classifier — no LLM needed.
+    Returns a document_type string used to guide chunk retrieval.
+    """
+    q = query.lower()
+    if any(w in q for w in ["lab", "result", "blood", "panel", "urine", "culture", "pathology", "test"]):
+        return "lab result"
+    if any(w in q for w in ["discharge", "hospital", "admission", "hospitalized"]):
+        return "discharge summary"
+    if any(w in q for w in ["imaging", "mri", "ct", "x-ray", "xray", "ultrasound", "scan", "radiology"]):
+        return "imaging"
+    if any(w in q for w in ["medication", "drug", "prescription", "dosage", "dose", "pharmacy", "rx"]):
+        return "prescription"
+    if any(w in q for w in ["note", "visit", "encounter", "assessment", "soap", "progress"]):
+        return "clinical note"
+    return "unknown"

@@ -86,10 +86,19 @@ PDFs / TIFFs / TXTs / HTMLs / JSONs
         │
         ├──▶  generate_full_timeline()  →  one LLM call  →  timeline events
         │
-        └──▶  _regenerate_summary()    →  one LLM call  →  structured summary
+        └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
+                                           ├── Pass 1: structured extraction
+                                           │   (conditions / medications / procedures / labs → JSON)
+                                           └── Pass 2: prose generation from pre-extracted facts
+                                               (fallback: inject pass-1 items directly if LLM drops a section)
 ```
 
 Ingestion always runs as a **background job**. The endpoint returns `{ job_id }` immediately. Frontend polls `/status/{job_id}` every 2 seconds for progress.
+
+**Summary generation — two-pass approach**: because patient records arrive in wildly different formats (CCD exports, portal HTML, PDFs, JSON), deterministic extraction is not reliable across all formats. `generate_summary()` in `timeline.py` therefore makes two LLM calls:
+
+1. **Pass 1 — structured extraction**: sends the filtered clinical sections (output of `_prepare_summary_records()`) to the LLM with a strict extraction-only prompt. Returns a JSON object: `{ demographics, conditions, medications, procedures, allergies, key_labs, concerns }`. No prose is requested.
+2. **Pass 2 — prose generation**: `_build_structured_input()` formats the Pass 1 JSON as pre-verified bullet lists. These are prepended to the summary prompt so the LLM writes prose *around known facts* rather than discovering them. After generation, `_inject_pass1_fallbacks()` checks each output section: if the LLM returned "No clear evidence" for a section that had items in Pass 1, the items are injected directly from the structured data, bypassing the LLM for that section.
 
 ### Triggers
 

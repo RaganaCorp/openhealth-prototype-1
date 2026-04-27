@@ -1,0 +1,779 @@
+"""
+FastAPI application — all routes.
+"""
+
+import asyncio
+import shutil
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+import ai
+import jobs
+import memory
+import patients as pt
+import timeline as tl
+import watcher
+from config import load_config, patch_config, save_config, Config
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await ai.ensure_ollama_available()
+    await watcher.start_watcher()
+    yield
+    watcher.stop_watcher()
+
+
+app = FastAPI(title="OpenHealth API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://frontend:3000",
+    ],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+import logging as _logging
+_logger = _logging.getLogger("uvicorn.error")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    _logger.exception(
+        "unhandled exception method=%s path=%s error=%s",
+        request.method,
+        request.url.path,
+        exc,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
+
+def _http_404(detail: str) -> HTTPException:
+    return HTTPException(status_code=404, detail=detail)
+
+
+def _http_409(detail: str) -> HTTPException:
+    return HTTPException(status_code=409, detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Request / Response models
+# ---------------------------------------------------------------------------
+
+class CreatePatientRequest(BaseModel):
+    name: str
+
+
+class PatchPatientRequest(BaseModel):
+    name: Optional[str] = None
+    memory_results_override: Optional[int] = None
+    context_window_tokens_override: Optional[int] = None
+
+
+class DeletePatientRequest(BaseModel):
+    delete_uploads: bool = True
+    delete_chats: bool = True
+    delete_record_files: bool = True
+    delete_vector_data: bool = True
+
+
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = None
+
+
+class RenameSessionRequest(BaseModel):
+    title: str
+
+
+class ChatRequest(BaseModel):
+    patient_id: str
+    chat_session_id: str
+    message: str
+
+
+class ConfigUpdateRequest(BaseModel):
+    model: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embed_timeout_seconds: Optional[float] = None
+    chat_timeout_seconds: Optional[float] = None
+    meta_timeout_seconds: Optional[float] = None
+    chunk_size: Optional[int] = None
+    chunk_overlap: Optional[int] = None
+    memory_results: Optional[int] = None
+    context_window_tokens: Optional[int] = None
+    data_path: Optional[str] = None
+    ollama_base_url: Optional[str] = None
+    grounding_enabled: Optional[bool] = None
+    grounding_max_retries: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Patients
+# ---------------------------------------------------------------------------
+
+@app.get("/patients")
+async def list_patients():
+    return await pt.load_patients_index()
+
+
+@app.post("/patients", status_code=201)
+async def create_patient(body: CreatePatientRequest):
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="Patient name cannot be empty")
+    patient = await pt.create_patient(body.name.strip())
+    # Start watching the new patient's uploads/ folder.
+    entry = await pt.find_patient_by_id(patient["id"])
+    if entry:
+        uploads_dir = Path(entry["folder_path"]) / "uploads"
+        watcher.add_patient_watch(patient["id"], uploads_dir)
+    return patient
+
+
+@app.get("/patients/{patient_id}")
+async def get_patient(patient_id: str):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+    record = await pt.load_patient_record(patient_id)
+    return {
+        "id": entry["id"],
+        "name": entry["name"],
+        "folder_slug": entry["folder_slug"],
+        "folder_path": entry["folder_path"],
+        "document_count": entry.get("document_count", 0),
+        "last_ingested_at": entry.get("last_ingested_at"),
+        "created_at": entry["created_at"],
+        "memory_results_override": None if record is None else record.get("memory_results_override"),
+        "context_window_tokens_override": None if record is None else record.get("context_window_tokens_override"),
+    }
+
+
+@app.patch("/patients/{patient_id}")
+async def patch_patient(patient_id: str, body: PatchPatientRequest):
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=422, detail="No fields to update")
+    result = await pt.patch_patient(patient_id, updates)
+    if result is None:
+        raise _http_404("Patient not found")
+    return result
+
+
+@app.delete("/patients/{patient_id}", status_code=204)
+async def delete_patient(patient_id: str, body: DeletePatientRequest):
+    entry = await pt.delete_patient_index_entry(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+
+    folder_path = Path(entry["folder_path"])
+
+    if body.delete_vector_data:
+        try:
+            await memory.delete_all_patient_collections(patient_id)
+        except Exception:
+            # Best-effort cleanup: do not block patient deletion if vector
+            # storage deletion fails due to backend-specific compatibility.
+            pass
+
+    if body.delete_uploads:
+        uploads = folder_path / "uploads"
+        if uploads.exists():
+            await asyncio.to_thread(shutil.rmtree, uploads, True)
+
+    if body.delete_chats:
+        chats = folder_path / "chats"
+        if chats.exists():
+            await asyncio.to_thread(shutil.rmtree, chats, True)
+
+    if body.delete_record_files:
+        for name in ("patient.json", "patient.md"):
+            f = folder_path / name
+            if f.exists():
+                f.unlink(missing_ok=True)
+        # Remove .extracted files.
+        uploads = folder_path / "uploads"
+        if uploads.exists():
+            for ef in uploads.glob("*.extracted"):
+                ef.unlink(missing_ok=True)
+
+    # If all patient content has been removed, delete the now-empty folder.
+    if body.delete_uploads and body.delete_chats and body.delete_record_files:
+        await asyncio.to_thread(shutil.rmtree, folder_path, True)
+
+
+# ---------------------------------------------------------------------------
+# Upload
+# ---------------------------------------------------------------------------
+
+@app.post("/patients/{patient_id}/upload")
+async def upload_files(
+    patient_id: str,
+    files: list[UploadFile] = File(...),
+):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+
+    uploads_dir = Path(entry["folder_path"]) / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_names: list[str] = []
+    for file in files:
+        safe_name = pt.sanitize_filename(file.filename or "upload")
+        dest = pt.safe_upload_path(uploads_dir, safe_name)
+        with open(dest, "wb") as out:
+            content = await file.read()
+            out.write(content)
+        saved_names.append(safe_name)
+
+    job = await jobs.start_incremental_ingestion(patient_id)
+    return {"filenames": saved_names, "job_id": job["job_id"]}
+
+
+# ---------------------------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------------------------
+
+@app.post("/ingest/{patient_id}")
+async def ingest(patient_id: str):
+    if await pt.find_patient_by_id(patient_id) is None:
+        raise _http_404("Patient not found")
+    job = await jobs.start_incremental_ingestion(patient_id)
+    return {"job_id": job["job_id"]}
+
+
+@app.post("/rebuild/{patient_id}")
+async def rebuild(patient_id: str):
+    if await pt.find_patient_by_id(patient_id) is None:
+        raise _http_404("Patient not found")
+    job = await jobs.start_full_rebuild(patient_id)
+    return {"job_id": job["job_id"]}
+
+
+@app.post("/refresh/{patient_id}")
+async def refresh(patient_id: str):
+    """Alias for incremental ingest — used internally by the watcher."""
+    if await pt.find_patient_by_id(patient_id) is None:
+        raise _http_404("Patient not found")
+    job = await jobs.start_incremental_ingestion(patient_id)
+    return {"job_id": job["job_id"]}
+
+
+@app.get("/status/{job_id}")
+async def job_status(job_id: str):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise _http_404("Job not found")
+    return job
+
+
+@app.get("/documents/{patient_id}")
+async def list_documents(patient_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    return record.get("documents", [])
+
+
+@app.delete("/documents/{patient_id}/{document_id}")
+async def delete_document(patient_id: str, document_id: str):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+
+    doc = next((d for d in record.get("documents", []) if d.get("id") == document_id), None)
+    if doc is None:
+        raise _http_404("Document not found")
+
+    uploads_dir = Path(entry["folder_path"]) / "uploads"
+    filename = doc.get("filename")
+    if isinstance(filename, str) and filename:
+        source_file = uploads_dir / filename
+        extracted_file = uploads_dir / f"{filename}.extracted"
+        source_file.unlink(missing_ok=True)
+        extracted_file.unlink(missing_ok=True)
+
+    job = await jobs.start_full_rebuild(patient_id)
+    return {"job_id": job["job_id"]}
+
+
+@app.get("/patients/{patient_id}/active-job")
+async def active_job(patient_id: str):
+    return jobs.get_active_job(patient_id)
+
+
+# ---------------------------------------------------------------------------
+# Summary & Timeline
+# ---------------------------------------------------------------------------
+
+@app.get("/summary/{patient_id}")
+async def get_summary(patient_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    return {"summary": record.get("summary", "")}
+
+
+@app.post("/summary/{patient_id}")
+async def regenerate_summary(patient_id: str):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+
+    from documents import read_patient_md
+    patient_md = await asyncio.to_thread(read_patient_md, Path(entry["folder_path"]))
+    summary = await tl.generate_summary(patient_md)
+
+    record = await pt.load_patient_record(patient_id)
+    if record:
+        record["summary"] = summary
+        await pt.save_patient_record(record)
+
+    return {"summary": summary}
+
+
+@app.get("/timeline/{patient_id}")
+async def get_timeline(patient_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    events = record.get("timeline", [])
+    return sorted(events, key=lambda e: (e["date"] == "unknown", e["date"]))
+
+
+@app.get("/timeline/{patient_id}/{event_id}")
+async def get_timeline_event(patient_id: str, event_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    event = next(
+        (e for e in record.get("timeline", []) if e["id"] == event_id), None
+    )
+    if event is None:
+        raise _http_404("Timeline event not found")
+    return event
+
+
+# ---------------------------------------------------------------------------
+# Chat sessions
+# ---------------------------------------------------------------------------
+
+@app.get("/patients/{patient_id}/chat-sessions")
+async def list_sessions(patient_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    return record.get("chat_sessions", [])
+
+
+@app.post("/patients/{patient_id}/chat-sessions", status_code=201)
+async def create_session(patient_id: str, body: CreateSessionRequest):
+    if await pt.find_patient_by_id(patient_id) is None:
+        raise _http_404("Patient not found")
+
+    session_id = str(uuid.uuid4())
+    now = _now()
+    session = {
+        "id": session_id,
+        "patient_id": patient_id,
+        "title": body.title or "New Chat",
+        "title_auto_generated": True,
+        "created_at": now,
+        "last_message_at": None,
+        "message_count": 0,
+    }
+    await pt.add_chat_session(patient_id, session)
+
+    # Initialise empty conversation state.
+    state = {
+        "patient_id": patient_id,
+        "session_id": session_id,
+        "title": session["title"],
+        "rolling_summary": "",
+        "active_topics": [],
+        "open_questions": [],
+        "created_at": now,
+        "last_updated_at": now,
+    }
+    await pt.save_conversation_state(patient_id, session_id, state)
+
+    return {"chat_session_id": session_id}
+
+
+@app.patch("/patients/{patient_id}/chat-sessions/{session_id}")
+async def rename_session(
+    patient_id: str, session_id: str, body: RenameSessionRequest
+):
+    result = await pt.update_chat_session(
+        patient_id, session_id, {"title": body.title, "title_auto_generated": False}
+    )
+    if result is None:
+        raise _http_404("Session not found")
+    return result
+
+
+@app.delete("/patients/{patient_id}/chat-sessions/{session_id}", status_code=204)
+async def delete_session(patient_id: str, session_id: str):
+    deleted = await pt.delete_chat_session(patient_id, session_id)
+    if not deleted:
+        raise _http_404("Session not found")
+    await memory.delete_chat_collection(patient_id, session_id)
+    await pt.delete_message_log(patient_id, session_id)
+
+
+# ---------------------------------------------------------------------------
+# Chat messages & state
+# ---------------------------------------------------------------------------
+
+@app.get("/chat/messages/{patient_id}/{session_id}")
+async def get_messages(patient_id: str, session_id: str):
+    log = await pt.load_message_log(patient_id, session_id)
+    if log is None:
+        raise _http_404("Patient not found")
+    return log
+
+
+@app.get("/chat/state/{patient_id}/{session_id}")
+async def get_chat_state(patient_id: str, session_id: str):
+    state = await pt.load_conversation_state(patient_id, session_id)
+    if state is None:
+        raise _http_404("Conversation state not found")
+    return state
+
+
+@app.post("/chat/reset/{patient_id}/{session_id}", status_code=204)
+async def reset_chat(patient_id: str, session_id: str):
+    await memory.delete_chat_collection(patient_id, session_id)
+    now = _now()
+    state = {
+        "patient_id": patient_id,
+        "session_id": session_id,
+        "rolling_summary": "",
+        "active_topics": [],
+        "open_questions": [],
+        "created_at": now,
+        "last_updated_at": now,
+    }
+    await pt.save_conversation_state(patient_id, session_id, state)
+    # Reset message log.
+    await pt.save_message_log(
+        patient_id, session_id, {"session_id": session_id, "messages": []}
+    )
+
+
+@app.post("/chat/rebuild-state/{patient_id}/{session_id}", status_code=204)
+async def rebuild_state(patient_id: str, session_id: str):
+    """Recompute conversation state from the stored message log."""
+    log = await pt.load_message_log(patient_id, session_id)
+    if log is None:
+        raise _http_404("Patient not found")
+
+    messages = log.get("messages", [])
+    if not messages:
+        return
+
+    # Reconstruct by feeding each exchange to the state updater.
+    state: Optional[dict] = None
+    for i in range(0, len(messages) - 1, 2):
+        user_msg = messages[i] if messages[i]["role"] == "user" else None
+        asst_msg = messages[i + 1] if len(messages) > i + 1 and messages[i + 1]["role"] == "assistant" else None
+        if user_msg and asst_msg:
+            updates = await tl.update_conversation_state(
+                state, user_msg["content"], asst_msg["content"]
+            )
+            if state is None:
+                now = _now()
+                state = {
+                    "patient_id": patient_id,
+                    "session_id": session_id,
+                    "created_at": now,
+                }
+            state.update(updates)
+
+    if state:
+        await pt.save_conversation_state(patient_id, session_id, state)
+
+
+# ---------------------------------------------------------------------------
+# Chat inference
+# ---------------------------------------------------------------------------
+
+@app.post("/chat")
+async def chat(body: ChatRequest):
+    from documents import read_patient_md  # noqa: PLC0415 — deferred to avoid circular import at module level
+
+    _logger.info(
+        "chat request received patient_id=%s session_id=%s message_len=%d",
+        body.patient_id,
+        body.chat_session_id,
+        len(body.message or ""),
+    )
+
+    cfg = load_config()
+    patient_id = body.patient_id
+    session_id = body.chat_session_id
+    user_message = body.message
+
+    try:
+        entry = await pt.find_patient_by_id(patient_id)
+        if entry is None:
+            raise _http_404("Patient not found")
+
+        record = await pt.load_patient_record(patient_id)
+        if record is None:
+            raise _http_404("Patient record not found")
+
+        # Per-patient overrides.
+        effective_memory_results = record.get("memory_results_override") or cfg.memory_results
+        effective_ctx_tokens = record.get("context_window_tokens_override") or cfg.context_window_tokens
+
+        # 1. Classify query for optimised chunk retrieval fallback.
+        doc_type = tl.classify_query(user_message)
+
+        # 2. Retrieve relevant chat history (semantic memory).
+        query_embedding = await ai.embed(user_message)
+        history_chunks = await memory.query_chat(
+            patient_id, session_id, query_embedding, effective_memory_results
+        )
+        history_text = "\n\n".join(c["text"] for c in history_chunks)
+
+        # 3. Load conversation state.
+        conv_state = await pt.load_conversation_state(patient_id, session_id)
+        state_capsule = ""
+        if conv_state:
+            state_capsule = (
+                f"Rolling summary: {conv_state.get('rolling_summary', '')}\n"
+                f"Active topics: {', '.join(conv_state.get('active_topics', []))}\n"
+                f"Open questions: {', '.join(conv_state.get('open_questions', []))}"
+            )
+
+        # 4. Patient context — full patient.md or chunk fallback.
+        patient_md = await asyncio.to_thread(read_patient_md, Path(entry["folder_path"]))
+        token_estimate = len(patient_md) // 4
+        use_chunks = token_estimate > effective_ctx_tokens
+
+        if use_chunks:
+            doc_chunks = await memory.query_docs(
+                patient_id, query_embedding, n_results=20, document_type=doc_type
+            )
+            patient_context = "\n\n".join(c["text"] for c in doc_chunks)
+        else:
+            patient_context = patient_md
+
+        _logger.info(
+            "chat context prepared patient_id=%s session_id=%s use_chunks=%s token_estimate=%d",
+            patient_id,
+            session_id,
+            use_chunks,
+            token_estimate,
+        )
+
+        # 5. Assemble prompt.
+        system_prompt = (
+            "You are OpenHealth, a knowledgeable and compassionate medical AI assistant.\n"
+            "You have been given the full medical record for this patient as context.\n"
+            "Use the documents to ground your responses — interpret, explain, and connect information across them.\n"
+            "When referencing specific information, cite the source document.\n"
+            "Be direct, warm, and clear. Write in paragraphs, not bullet points.\n"
+            "You are not limited to only what is in the documents — use your medical knowledge\n"
+            "to help the user understand, interpret, and act on what the records contain."
+        )
+
+        user_content_parts = []
+        if patient_context:
+            user_content_parts.append(f"PATIENT RECORDS:\n{patient_context}")
+        if state_capsule:
+            user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
+        if history_text:
+            user_content_parts.append(f"RELEVANT PRIOR EXCHANGES:\n{history_text}")
+        user_content_parts.append(f"USER QUESTION:\n{user_message}")
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n---\n\n".join(user_content_parts)},
+        ]
+
+        # 6. Generate response.
+        draft = await ai.chat_complete(messages)
+
+        # 7. Grounding verification.
+        grounding_retried = False
+        retry_count = 0
+        final_answer = draft
+        citations: list[dict] = []
+
+        if cfg.grounding_enabled:
+            context_for_grounding = patient_context
+            for attempt in range(cfg.grounding_max_retries + 1):
+                result = await tl.verify_grounding(final_answer, context_for_grounding)
+                citations = result.get("citations", [])
+                if attempt > 0:
+                    grounding_retried = True
+                    retry_count = attempt
+                # Accept if uncertainty_note is empty or answer hasn't changed materially.
+                final_answer = result["corrected_answer"]
+                if not result.get("uncertainty_note") or attempt >= cfg.grounding_max_retries:
+                    break
+                # Retry with corrected answer as the new draft.
+
+        # 8. Persist exchange.
+        now = _now()
+        user_msg_record = {
+            "id": str(uuid.uuid4()),
+            "role": "user",
+            "content": user_message,
+            "citations": [],
+            "timestamp": now,
+        }
+        asst_msg_record = {
+            "id": str(uuid.uuid4()),
+            "role": "assistant",
+            "content": final_answer,
+            "citations": citations,
+            "timestamp": now,
+        }
+        await pt.append_message(patient_id, session_id, user_msg_record)
+        await pt.append_message(patient_id, session_id, asst_msg_record)
+
+        # Embed and store the exchange in ChromaDB chat memory.
+        exchange_text = f"User: {user_message}\nAssistant: {final_answer}"
+        exchange_embedding = await ai.embed(exchange_text)
+        await memory.upsert_chat_exchange(
+            patient_id=patient_id,
+            session_id=session_id,
+            exchange_id=str(uuid.uuid4()),
+            text=exchange_text,
+            embedding=exchange_embedding,
+            metadata={
+                "patient_id": patient_id,
+                "chat_session_id": session_id,
+                "role": "exchange",
+                "timestamp": now,
+            },
+        )
+
+        # 9. Update conversation state (fire-and-forget style but awaited since
+        #    we're still in the request — acceptable latency for a local app).
+        state_updates = await tl.update_conversation_state(conv_state, user_message, final_answer)
+        if conv_state is None:
+            conv_state = {
+                "patient_id": patient_id,
+                "session_id": session_id,
+                "created_at": now,
+            }
+        conv_state.update(state_updates)
+        await pt.save_conversation_state(patient_id, session_id, conv_state)
+
+        # 10. Update session metadata.
+        log = await pt.load_message_log(patient_id, session_id)
+        msg_count = len(log["messages"]) if log else 0
+        session_updates: dict[str, Any] = {
+            "last_message_at": now,
+            "message_count": msg_count,
+        }
+
+        # Auto-title on first completed exchange.
+        session_record = next(
+            (s for s in record.get("chat_sessions", []) if s["id"] == session_id), None
+        )
+        _logger.info(
+            "auto-title check session_id=%s session_found=%s title_auto_generated=%s msg_count=%d",
+            session_id,
+            session_record is not None,
+            session_record.get("title_auto_generated") if session_record else None,
+            msg_count,
+        )
+        if session_record and session_record.get("title_auto_generated") and session_record.get("title") == "New Chat":
+            try:
+                auto_title = await tl.generate_session_title(user_message, final_answer)
+                _logger.info("auto-title generated session_id=%s title=%r", session_id, auto_title)
+                if auto_title:
+                    session_updates["title"] = auto_title
+                    session_updates["title_auto_generated"] = False
+            except Exception:
+                _logger.exception("auto-title failed session_id=%s — skipping", session_id)
+
+        await pt.update_chat_session(patient_id, session_id, session_updates)
+
+        _logger.info(
+            "chat request completed patient_id=%s session_id=%s message_len=%d response_len=%d",
+            patient_id,
+            session_id,
+            len(user_message or ""),
+            len(final_answer or ""),
+        )
+
+        return {
+            "response": final_answer,
+            "grounding_retried": grounding_retried,
+            "retry_count": retry_count,
+            "citations": citations,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _logger.exception(
+            "chat request failed patient_id=%s session_id=%s message_len=%d",
+            patient_id,
+            session_id,
+            len(user_message or ""),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat pipeline failed: {type(exc).__name__}: {exc}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@app.get("/config")
+async def get_config():
+    return load_config().model_dump()
+
+
+@app.post("/config")
+async def update_config(body: ConfigUpdateRequest):
+    updates = body.model_dump(exclude_none=True)
+    updated = patch_config(updates)
+    return updated.model_dump()
+
+
+@app.get("/models")
+async def list_models():
+    try:
+        models = await ai.list_models()
+        return {"models": models}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Ollama: {e}")
