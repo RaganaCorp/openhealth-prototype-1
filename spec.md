@@ -21,7 +21,7 @@
            │                      │
 ┌──────────▼──────┐    ┌──────────▼───────────────┐
 │  Ollama         │    │  ChromaDB (persistent)   │
-│  MedGemma1.5    │    │  /data/memory_db/        │
+│  dcarrascosa/...│    │  /data/memory_db/        │
 │  nomic-embed    │    │  memory_db/              │
 └─────────────────┘    └──────────────────────────┘
 ```
@@ -36,7 +36,7 @@
 | Styling | Tailwind CSS v4 |
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | AI inference | Ollama (local) |
-| Default chat model | `MedAIBase/MedGemma1.5:4b` |
+| Default chat model | `dcarrascosa/medgemma-1.5-4b-it:Q8_0` |
 | Default embedding model | `nomic-embed-text` (768-dim) |
 | Vector store | ChromaDB (persistent, cosine similarity) |
 | PDF extraction | PyMuPDF (fitz) |
@@ -86,8 +86,17 @@ PDFs / TIFFs / TXTs / HTMLs
         │
         ├──▶  generate_full_timeline()  →  one LLM call  →  timeline events
         │
-        └──▶  _regenerate_summary()    →  one LLM call  →  structured summary
+        └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
+                                           ├── Pass 1: structured extraction
+                                           │   (conditions / medications / procedures / labs → JSON)
+                                           ├── Deterministic fallback merge
+                                           │   (regex-based section extraction from patient.md
+                                           │    merged with pass-1 results; used when pass-1 sparse)
+                                           └── Pass 2: prose generation from pre-extracted facts
+                                               (fallback: inject pass-1 items directly if LLM drops a section)
 ```
+
+**Summary generation — two-pass approach**: because patient records arrive in wildly different formats (CCD exports, portal HTML, PDFs, JSON), deterministic extraction is not reliable across all formats. Summary generation therefore uses two LLM calls. **Pass 1** sends the full `patient.md` (up to 30,000 characters) to the LLM with a strict extraction-only prompt and receives a JSON object containing conditions, medications, procedures, key labs, and demographics. After pass-1, a deterministic fallback extracts section blobs from `patient.md` by regex-matching common section headers (e.g. "Active Problems", "Medications", "Procedures") and parses list items as a safety net. The pass-1 LLM output and the deterministic fallback are then merged (LLM results take precedence; deterministic fills any empty arrays). **Pass 2** formats those extracted facts as explicit pre-verified bullet lists and sends them to the LLM for prose generation. If the LLM drops a section in Pass 2 that had items in the merged structured data, those items are injected directly as a fallback, bypassing the LLM for that section.
 
 Ingestion runs as a background job. Frontend polls `/status/{job_id}` every 2 seconds and displays live progress.
 
@@ -164,7 +173,7 @@ assemble_turn_context()        ← stateless packet for this turn only
   - current user question
       │
       ▼
-Ollama (MedAIBase/MedGemma1.5:4b)
+Ollama (dcarrascosa/medgemma-1.5-4b-it:Q8_0)
   │
   ▼
 verify_grounding()             ← citation + factual support check
@@ -363,6 +372,7 @@ This flat ordered log is the source of truth for rendering chat history in the U
 - `POST /refresh/{patient_id}` — alias for incremental ingest; kept for internal use by the watcher
 - `GET /status/{job_id}` — returns job status and progress
 - `GET /documents/{patient_id}` — list all ingested documents
+- `DELETE /documents/{patient_id}/{document_id}` — delete one uploaded document by ID, remove its cached `.extracted` sidecar, and trigger a rebuild. Returns `{ job_id }`.
 - `GET /patients/{id}/active-job` — returns the currently running ingestion job for a patient (or `null`). Used by the frontend to discover watcher-triggered jobs and display progress without a client-initiated `job_id`.
 
 ### Summary & Timeline
@@ -447,7 +457,7 @@ openhealth/
 │   │   ├── Citation.tsx
 │   │   ├── DeletePatientModal.tsx  # confirmation modal with per-item checkboxes before delete
 │   │   ├── IngestionProgress.tsx
-│   │   ├── PatientSettings.tsx   # patient settings form (rename, overrides, regenerate summary, delete)
+│   │   ├── PatientSettings.tsx   # patient settings form (rename, overrides, document upload/delete, delete patient)
 │   │   ├── SummaryPanel.tsx      # renders summary markdown string as HTML
 │   │   └── Timeline.tsx
 │   ├── lib/
@@ -529,7 +539,7 @@ Config is stored at `./data/config/config.json` (inside the mounted volume). It 
 
 ```json
 {
-  "model": "MedAIBase/MedGemma1.5:4b",
+  "model": "dcarrascosa/medgemma-1.5-4b-it:Q8_0",
   "embedding_model": "nomic-embed-text",
   "chunk_size": 900,
   "chunk_overlap": 100,
@@ -541,6 +551,8 @@ Config is stored at `./data/config/config.json` (inside the mounted volume). It 
   "grounding_max_retries": 2
 }
 ```
+
+Model names are used exactly as configured. There is no model aliasing/normalization layer.
 
 ---
 
@@ -632,26 +644,49 @@ Return:
 Do not add new clinical facts that are not in evidence.
 ```
 
-### Summary generation
+### Summary generation — Pass 1 (extraction)
+```
+You are a clinical data extractor. Extract structured information from the following
+medical records. Return ONLY valid JSON in this exact format — no prose, no explanation:
+
+{
+  "demographics": { "age": "", "sex": "", "dob": "" },
+  "conditions": ["..."],
+  "medications": ["..."],
+  "procedures": ["..."],
+  "key_labs": ["..."],
+  "allergies": ["..."]
+}
+
+Rules:
+- Extract only information that is explicitly stated in the records.
+- Do not invent or infer. Leave arrays empty if nothing is found.
+- Medications: include drug name and dosage if present.
+- Labs: include test name and value/date if present.
+- Conditions: use the clinical terminology from the records.
+```
+
+### Summary generation — Pass 2 (prose)
 ```
 You are a medical summarization assistant. Be precise and factual.
-Based on the following medical documents, produce a markdown-formatted summary
-using the exact section headers below. Keep each section concise.
+The following pre-extracted clinical facts have been verified from the patient's records.
+Use them to produce a markdown-formatted summary using the exact section headers below.
+Do not invent facts not present in the provided data. Keep each section concise.
 
 ## Overview
-3-4 sentences summarizing the patient's overall medical history.
+3-4 sentences summarizing the patient's overall medical picture based on the facts below.
 
 ## Active Conditions
-List current diagnosed conditions.
+[pre-extracted conditions list injected here]
 
 ## Current Medications
-List medications with dosage where available.
+[pre-extracted medications list injected here]
 
 ## Recent Procedures
-List recent procedures or hospitalizations.
+[pre-extracted procedures list injected here]
 
 ## Key Concerns
-Note patterns, gaps, or items that warrant attention.
+Note patterns, gaps, or items that warrant attention based on the above facts.
 ```
 
 ### Timeline generation
@@ -689,6 +724,9 @@ unless they carry clinical meaning. Preserve all dates and values exactly as the
 11. **Auto-titled sessions** — session title is set to "New Chat" on creation; after the first exchange the backend generates a descriptive title via LLM. User renames lock the title permanently.
 12. **Message log for display** — ordered messages are written to `./data/patients/{slug}/chats/` on every turn and read back directly for UI rendering; ChromaDB is used only for semantic retrieval, not display.
 13. **No authentication** — local single-user app; no login required.
+14. **Optimistic chat send** — when the user sends a message, it is displayed immediately with a "Sending..." status indicator. On success the message is replaced by the server-confirmed exchange. On failure the message remains visible with a "Failed to send. Please retry." notice rather than disappearing; the error is also logged to the browser console.
+15. **Markdown rendering in chat** — assistant responses are rendered as sanitized HTML using `marked` + `DOMPurify` with the `.markdown-body` stylesheet. User messages remain plain text. This mirrors the rendering behavior of the Summary panel.
+16. **Backend observability** — every LLM call logs the full request payload and response to the `uvicorn.error` logger. Transport and HTTP errors log status codes and response bodies. The `/chat` endpoint logs lifecycle events (request received, context prepared, response sent) and catches all unhandled exceptions for structured logging.
 
 ---
 
@@ -763,7 +801,9 @@ A dedicated page for per-patient configuration, accessible via a settings icon o
 - **Rename patient** — editable name field. On save, calls `PATCH /patients/{id}` with `{ name }`. Backend updates the `patients.json` entry; the folder slug is not renamed (slug is permanent once created).
 - **Multi-turn memory threshold** — `memory_results` override for this patient (number of past exchanges retrieved per turn). Defaults to the global `memory_results` from config if not set.
 - **Context window override** — `context_window_tokens` override for this patient. Defaults to global config value if not set.
-- **Regenerate summary** — button that calls `POST /summary/{patient_id}` and displays a loading state while the job runs.
+- **Documents loaded panel** — shows all currently ingested documents for the patient from `GET /documents/{patient_id}`.
+- **Upload documents** — uses the same upload flow as the patient workspace (`POST /patients/{id}/upload`) and shows ingestion progress.
+- **Delete document** — per-document delete action calls `DELETE /documents/{patient_id}/{document_id}` and triggers rebuild job progress.
 - **Delete patient** — opens the same confirmation modal with per-item checkboxes as the home-page delete flow.
 
 Per-patient overrides (`memory_results_override`, `context_window_tokens_override`) are stored in the patient's `patient.json`. When present, they take precedence over global config values for that patient only. When absent or `null`, global config is used.
