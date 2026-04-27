@@ -3,8 +3,8 @@
   "private": true,
   "scripts": {
     "install": "npm install --prefix frontend && pip install -r backend/requirements.txt",
-    "dev": "concurrently --kill-others --kill-others-on-fail --names \"backend,frontend\" --prefix-colors \"cyan,magenta\" \"cross-env DATA_PATH=./data OLLAMA_BASE_URL=http://127.0.0.1:11434 C:/Users/adam/AppData/Local/Microsoft/WindowsApps/python3.11.exe -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000 --log-level debug\" \"npm run dev --prefix frontend\"",
-    "dev:backend": "cross-env DATA_PATH=./data OLLAMA_BASE_URL=http://127.0.0.1:11434 C:/Users/adam/AppData/Local/Microsoft/WindowsApps/python3.11.exe -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000 --log-level debug",
+    "dev": "concurrently --kill-others --kill-others-on-fail --names \"backend,frontend\" --prefix-colors \"cyan,magenta\" \"cross-env DATA_PATH=./data OLLAMA_BASE_URL=http://127.0.0.1:11434 python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000 --log-level debug\" \"npm run dev --prefix frontend\"",
+    "dev:backend": "cross-env DATA_PATH=./data OLLAMA_BASE_URL=http://127.0.0.1:11434 python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000 --log-level debug",
     "dev:frontend": "npm run dev --prefix frontend",
     "install:ollama:docker": "docker pull ollama/ollama:latest",
     "start:ollama:docker": "docker container inspect ollama-local >NUL 2>&1 && docker start ollama-local || docker run -d --name ollama-local -p 11434:11434 -v ollama:/root/.ollama ollama/ollama:latest"
