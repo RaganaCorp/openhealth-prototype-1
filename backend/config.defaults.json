@@ -1,5 +1,5 @@
 {
-  "model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
+  "model": "dcarrascosa/medgemma-1.5-4b-it:Q8_0",
   "embedding_model": "nomic-embed-text",
   "embed_timeout_seconds": 60.0,
   "chat_timeout_seconds": 600.0,
