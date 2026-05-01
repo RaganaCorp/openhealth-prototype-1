@@ -62,6 +62,8 @@ def _create_job(patient_id: str) -> dict:
         "phase_started_at": started_at,
         "started_at": started_at,
         "completed_at": None,
+        # List of {phase, elapsed_ms} for all completed phases, in order.
+        "phase_history": [],
     }
     _jobs[job_id] = job
     _patient_active[patient_id] = job_id
@@ -70,6 +72,17 @@ def _create_job(patient_id: str) -> dict:
 
 def _set_phase(job: dict, phase: str, current_file: Optional[str] = None) -> None:
     if job.get("phase") != phase:
+        # Record elapsed time for the phase that just ended.
+        prev_phase = job.get("phase")
+        prev_started = job.get("phase_started_at")
+        if prev_phase and prev_started:
+            from datetime import datetime, timezone
+            try:
+                start_dt = datetime.fromisoformat(prev_started)
+                elapsed_ms = int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000)
+            except ValueError:
+                elapsed_ms = 0
+            job["phase_history"].append({"phase": prev_phase, "elapsed_ms": elapsed_ms})
         job["phase"] = phase
         job["phase_started_at"] = _now()
     if current_file is not None:
@@ -244,10 +257,13 @@ def _rebuild_patient_md(patient_folder: Path, doc_records: list[dict]) -> None:
 # Public ingestion entry points
 # ---------------------------------------------------------------------------
 
-async def start_incremental_ingestion(patient_id: str) -> dict:
+async def start_incremental_ingestion(
+    patient_id: str,
+    target_filenames: Optional[list[str]] = None,
+) -> dict:
     """Create job, fire background task, return job immediately."""
     job = _create_job(patient_id)
-    asyncio.create_task(_run_incremental(patient_id, job))
+    asyncio.create_task(_run_incremental(patient_id, job, target_filenames))
     return job
 
 
@@ -262,7 +278,11 @@ async def start_full_rebuild(patient_id: str) -> dict:
 # Background task implementations
 # ---------------------------------------------------------------------------
 
-async def _run_incremental(patient_id: str, job: dict) -> None:
+async def _run_incremental(
+    patient_id: str,
+    job: dict,
+    target_filenames: Optional[list[str]] = None,
+) -> None:
     try:
         _set_phase(job, "loading")
         entry = await pt.find_patient_by_id(patient_id)
@@ -285,10 +305,13 @@ async def _run_incremental(patient_id: str, job: dict) -> None:
         }
 
         all_files = await asyncio.to_thread(docs_module.scan_uploads, uploads_dir)
+        target_file_set = set(target_filenames or [])
 
         # Determine which files need processing.
         files_to_process = []
         for fp in all_files:
+            if target_file_set and fp.name not in target_file_set:
+                continue
             ed = existing_docs.get(fp.name)
             if ed is None or _file_changed(fp, ed):
                 files_to_process.append((fp, ed))
@@ -319,8 +342,6 @@ async def _run_incremental(patient_id: str, job: dict) -> None:
 
         # Regenerate timeline and summary only if files were processed.
         if files_to_process:
-            _set_phase(job, "generating_timeline", "timeline")
-            record["timeline"] = await tl.generate_timeline(patient_id, patient_md_text)
             _set_phase(job, "generating_summary", "summary")
             record["summary"] = await tl.generate_summary(patient_md_text)
 
@@ -380,9 +401,7 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
             docs_module.read_patient_md, patient_folder
         )
 
-        _set_phase(job, "generating_timeline", "timeline")
         record["documents"] = new_docs
-        record["timeline"] = await tl.generate_timeline(patient_id, patient_md_text)
         _set_phase(job, "generating_summary", "summary")
         record["summary"] = await tl.generate_summary(patient_md_text)
 

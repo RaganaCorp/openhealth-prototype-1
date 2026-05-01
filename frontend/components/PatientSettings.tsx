@@ -31,6 +31,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
   const [documents, setDocuments] = useState<PatientDocument[]>([]);
   const [loadingDocuments, setLoadingDocuments] = useState(true);
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
+  const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -43,6 +44,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
         if (!cancelled) {
           setDocuments(docs);
           setActiveJob(job);
+          setTrackedJobId(job?.job_id ?? null);
         }
       } catch (err) {
         if (!cancelled) {
@@ -60,13 +62,12 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
     const interval = window.setInterval(async () => {
       try {
         const job = await getActiveJob(patient.id);
-        if (!cancelled) {
+        if (!cancelled && job) {
           setActiveJob(job);
+          setTrackedJobId(job.job_id);
         }
       } catch {
-        if (!cancelled) {
-          setActiveJob(null);
-        }
+        // Keep the last known job visible if status polling is already handling it.
       }
     }, 2000);
 
@@ -176,15 +177,17 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
             </div>
           </div>
 
-          {activeJob ? (
+          {trackedJobId ? (
             <div className="mt-5">
               <IngestionProgress
-                jobId={activeJob.job_id}
-                onResolved={async () => {
-                  setActiveJob(null);
-                  const [docs, job] = await Promise.all([getDocuments(patient.id), getActiveJob(patient.id)]);
+                jobId={trackedJobId}
+                onResolved={async (job) => {
+                  const [docs, nextJob] = await Promise.all([getDocuments(patient.id), getActiveJob(patient.id)]);
                   setDocuments(docs);
-                  setActiveJob(job);
+                  setActiveJob(nextJob);
+                  if (job?.status === "complete") {
+                    setTrackedJobId(null);
+                  }
                 }}
               />
             </div>
@@ -193,6 +196,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
           <div className="mt-5">
             <UploadArea
               onUploaded={async (jobId) => {
+                setTrackedJobId(jobId);
                 setActiveJob({
                   job_id: jobId,
                   patient_id: patient.id,
@@ -235,6 +239,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
                       setDeletingDocumentId(doc.id);
                       setError(null);
                       const result = await deleteDocument(patient.id, doc.id);
+                      setTrackedJobId(result.job_id);
                       setActiveJob({
                         job_id: result.job_id,
                         patient_id: patient.id,

@@ -42,14 +42,9 @@ export type ChatLog = {
   messages: ChatMessage[];
 };
 
-export type TimelineEvent = {
-  id: string;
-  patient_id: string;
-  date: string;
-  title: string;
-  summary: string;
-  document_type: string;
-  source_filename: string;
+export type PhaseHistoryEntry = {
+  phase: string;
+  elapsed_ms: number;
 };
 
 export type JobStatus = {
@@ -58,6 +53,7 @@ export type JobStatus = {
   status: "running" | "complete" | "failed";
   phase?: string;
   phase_started_at?: string;
+  phase_history?: PhaseHistoryEntry[];
   total: number;
   processed: number;
   current_file: string | null;
@@ -232,10 +228,6 @@ export function getSummary(patientId: string) {
 
 export function regenerateSummary(patientId: string) {
   return request<{ summary: string }>(`/summary/${patientId}`, { method: "POST" });
-}
-
-export function getTimeline(patientId: string) {
-  return request<TimelineEvent[]>(`/timeline/${patientId}`);
 }
 
 export function getChatSessions(patientId: string) {

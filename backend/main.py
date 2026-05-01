@@ -252,7 +252,7 @@ async def upload_files(
             out.write(content)
         saved_names.append(safe_name)
 
-    job = await jobs.start_incremental_ingestion(patient_id)
+    job = await jobs.start_incremental_ingestion(patient_id, saved_names)
     return {"filenames": saved_names, "job_id": job["job_id"]}
 
 
@@ -360,28 +360,6 @@ async def regenerate_summary(patient_id: str):
         await pt.save_patient_record(record)
 
     return {"summary": summary}
-
-
-@app.get("/timeline/{patient_id}")
-async def get_timeline(patient_id: str):
-    record = await pt.load_patient_record(patient_id)
-    if record is None:
-        raise _http_404("Patient not found")
-    events = record.get("timeline", [])
-    return sorted(events, key=lambda e: (e["date"] == "unknown", e["date"]))
-
-
-@app.get("/timeline/{patient_id}/{event_id}")
-async def get_timeline_event(patient_id: str, event_id: str):
-    record = await pt.load_patient_record(patient_id)
-    if record is None:
-        raise _http_404("Patient not found")
-    event = next(
-        (e for e in record.get("timeline", []) if e["id"] == event_id), None
-    )
-    if event is None:
-        raise _http_404("Timeline event not found")
-    return event
 
 
 # ---------------------------------------------------------------------------

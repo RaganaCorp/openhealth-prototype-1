@@ -64,7 +64,6 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
     loading: "Loading patient record",
     processing_files: "Extracting and embedding files",
     rebuilding_patient_md: "Rebuilding patient document",
-    generating_timeline: "Generating timeline",
     generating_summary: "Generating summary",
     saving: "Saving updates",
     complete: "Ready",
@@ -79,13 +78,15 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
   const phaseStartedAtMs = job.phase_started_at ? Date.parse(job.phase_started_at) : NaN;
   const phaseElapsedMs = Number.isFinite(phaseStartedAtMs) ? Math.max(0, Date.now() - phaseStartedAtMs) : 0;
   const totalStartedAtMs = Date.parse(job.started_at);
-  const totalElapsedMs = Number.isFinite(totalStartedAtMs) ? Math.max(0, Date.now() - totalStartedAtMs) : 0;
+  const completedAtMs = job.completed_at ? Date.parse(job.completed_at) : NaN;
+  const totalElapsedMs = Number.isFinite(totalStartedAtMs)
+    ? Math.max(0, (Number.isFinite(completedAtMs) ? completedAtMs : Date.now()) - totalStartedAtMs)
+    : 0;
 
   const phaseWarningThresholdMs: Record<string, number> = {
     loading: 10_000,
     processing_files: 45_000,
     rebuilding_patient_md: 15_000,
-    generating_timeline: 40_000,
     generating_summary: 40_000,
     saving: 10_000,
   };
@@ -124,9 +125,28 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
           <span>
             Phase elapsed {formatDuration(phaseElapsedMs)} · Total elapsed {formatDuration(totalElapsedMs)}
           </span>
-        ) : null}
+        ) : (
+          <span>Total elapsed {formatDuration(totalElapsedMs)}</span>
+        )}
         {job.error ? <span className="text-error">{job.error}</span> : null}
       </div>
+
+      {Object.keys(job.phase_history ?? {}).length > 0 || (job.status === "running" && job.phase) ? (
+        <div className="mt-3 space-y-1 border-t border-border/40 pt-3">
+          {(job.phase_history ?? []).map((entry, i) => (
+            <div key={i} className="flex justify-between text-xs text-text-secondary">
+              <span>{phaseLabels[entry.phase] ?? entry.phase}</span>
+              <span>{formatDuration(entry.elapsed_ms)}</span>
+            </div>
+          ))}
+          {job.status === "running" && job.phase ? (
+            <div className="flex justify-between text-xs text-text-secondary">
+              <span>{phaseLabels[job.phase] ?? job.phase}</span>
+              <span>{formatDuration(phaseElapsedMs)} (running)</span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {isPhaseSlow ? (
         <div className="mt-2 text-xs text-error">

@@ -8,7 +8,6 @@ import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
 import { IngestionProgress } from "@/components/IngestionProgress";
 import { SummaryPanel } from "@/components/SummaryPanel";
-import { Timeline } from "@/components/Timeline";
 import { UploadArea } from "@/components/UploadArea";
 import {
   createChatSession,
@@ -19,12 +18,10 @@ import {
   getPatient,
   getPatients,
   getSummary,
-  getTimeline,
   type ChatSession,
   type JobStatus,
   type Patient,
   type PatientDocument,
-  type TimelineEvent,
 } from "@/lib/api";
 
 type MainTab = "summary" | "chat" | "files";
@@ -40,9 +37,9 @@ export default function PatientPage() {
   const [patient, setPatient] = useState<Patient | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [summary, setSummary] = useState("");
-  const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [documents, setDocuments] = useState<PatientDocument[]>([]);
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
+  const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -62,9 +59,8 @@ export default function PatientPage() {
   }
 
   async function refreshRecordView() {
-    const [summaryData, timelineData, documentsData] = await Promise.all([getSummary(patientId), getTimeline(patientId), getDocuments(patientId)]);
+    const [summaryData, documentsData] = await Promise.all([getSummary(patientId), getDocuments(patientId)]);
     setSummary(summaryData.summary);
-    setTimeline(timelineData);
     setDocuments(documentsData);
   }
 
@@ -93,16 +89,25 @@ export default function PatientPage() {
   }, [patientId]);
 
   useEffect(() => {
+    setTrackedJobId(null);
     const interval = window.setInterval(async () => {
       try {
         const job = await getActiveJob(patientId);
-        setActiveJob(job);
+        if (job) {
+          setActiveJob(job);
+          setTrackedJobId(job.job_id);
+        }
       } catch {
-        setActiveJob(null);
+        // Keep the last known job visible if status polling is already handling it.
       }
     }, 2000);
 
-    void getActiveJob(patientId).then(setActiveJob).catch(() => setActiveJob(null));
+    void getActiveJob(patientId)
+      .then((job) => {
+        setActiveJob(job);
+        setTrackedJobId(job?.job_id ?? null);
+      })
+      .catch(() => setActiveJob(null));
 
     return () => window.clearInterval(interval);
   }, [patientId]);
@@ -119,7 +124,7 @@ export default function PatientPage() {
 
   return (
     <>
-      <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)_320px]">
+      <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
         <aside className="panel-card panel-scroll h-[calc(100vh-8.75rem)] animate-fade-up">
           <div className="flex items-center justify-between">
             <div>
@@ -223,14 +228,17 @@ export default function PatientPage() {
             </div>
           </div>
 
-          {activeJob ? (
+          {trackedJobId ? (
             <div className="mb-4">
               <IngestionProgress
-                jobId={activeJob.job_id}
-                onResolved={async () => {
-                  setActiveJob(null);
+                jobId={trackedJobId}
+                onResolved={async (job) => {
                   await refreshSidebar();
                   await refreshRecordView();
+                  if (job.status === "complete") {
+                    setActiveJob(null);
+                    setTrackedJobId(null);
+                  }
                 }}
               />
             </div>
@@ -270,9 +278,21 @@ export default function PatientPage() {
               </div>
 
               <UploadArea
-                onUploaded={async () => {
-                  const job = await getActiveJob(patient.id);
-                  setActiveJob(job);
+                onUploaded={(jobId) => {
+                  const startedAt = new Date().toISOString();
+                  setTrackedJobId(jobId);
+                  setActiveJob({
+                    job_id: jobId,
+                    patient_id: patient.id,
+                    status: "running",
+                    total: 0,
+                    processed: 0,
+                    current_file: null,
+                    phase: "queued",
+                    phase_started_at: startedAt,
+                    started_at: startedAt,
+                    completed_at: null,
+                  });
                 }}
                 patientId={patient.id}
               />
@@ -294,9 +314,7 @@ export default function PatientPage() {
           ) : null}
         </section>
 
-        <aside className="panel-card panel-scroll h-[calc(100vh-8.75rem)] animate-fade-up [animation-delay:240ms]">
-          <Timeline events={timeline} />
-        </aside>
+
       </div>
 
       <AddPatientFlow
