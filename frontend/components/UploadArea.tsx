@@ -41,8 +41,8 @@ export function UploadArea({ patientId, onUploaded }: UploadAreaProps) {
         }}
         type="button"
       >
-        <span className="text-base font-semibold text-text-primary">Drag files here or choose from your computer</span>
-        <span className="mt-2 text-sm text-text-secondary">PDF, TIFF, TXT, HTML, and JSON are supported.</span>
+        <span className="block text-base font-semibold text-text-primary">Drag files here or choose from your computer</span>
+        <span className="mt-2 block text-sm text-text-secondary">PDF, TIFF, TXT, HTML, and JSON are supported.</span>
       </button>
 
       <input

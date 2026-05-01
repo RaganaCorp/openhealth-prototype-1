@@ -160,18 +160,18 @@ export default function PatientPage() {
             </Link>
           </div>
 
-          <div className="mt-4 rounded-[20px] border border-border/80 bg-surface-elevated p-3 text-xs text-text-secondary">
+          <div className="mt-4 rounded-2xl border border-border/60 bg-surface p-3 text-xs text-text-secondary">
             {patient.document_count} docs · Last ingest: {formatDate(patient.last_ingested_at)}
           </div>
 
-          <div className="mt-8 border-t border-border/80 pt-6">
+          <div className="mt-6 border-t border-border/80 pt-5">
             <div className="flex items-center justify-between">
               <div>
                 <p className="eyebrow">Chats</p>
                 <p className="text-sm text-text-secondary">Keep separate threads for distinct questions.</p>
               </div>
               <button
-                className="button-secondary px-3 py-2 text-xs"
+                className="button-secondary whitespace-nowrap px-4 py-2 text-sm"
                 onClick={() => {
                   startTransition(() => {
                     router.push(`/patient/${patient.id}?session=new`);
@@ -179,7 +179,7 @@ export default function PatientPage() {
                 }}
                 type="button"
               >
-                New Chat
+                New chat
               </button>
             </div>
 
