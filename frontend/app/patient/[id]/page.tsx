@@ -11,6 +11,7 @@ import { SummaryPanel } from "@/components/SummaryPanel";
 import { UploadArea } from "@/components/UploadArea";
 import {
   createChatSession,
+  deleteDocument,
   formatDate,
   getActiveJob,
   getChatSessions,
@@ -44,6 +45,7 @@ export default function PatientPage() {
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>("chat");
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
 
   async function refreshSidebar() {
     const [patientData, patientsData, sessionsData] = await Promise.all([
@@ -307,6 +309,41 @@ export default function PatientPage() {
                         {doc.document_type} · {doc.date_detected}
                       </span>
                     </div>
+                    <button
+                      className="button-danger px-3 py-2 text-xs"
+                      disabled={Boolean(trackedJobId) || deletingDocumentId === doc.id}
+                      onClick={async () => {
+                        const confirmed = window.confirm(`Delete ${doc.filename}? This will trigger a rebuild.`);
+                        if (!confirmed) {
+                          return;
+                        }
+
+                        try {
+                          setDeletingDocumentId(doc.id);
+                          const result = await deleteDocument(patient.id, doc.id);
+                          setTrackedJobId(result.job_id);
+                          setActiveJob({
+                            job_id: result.job_id,
+                            patient_id: patient.id,
+                            status: "running",
+                            total: 0,
+                            processed: 0,
+                            current_file: null,
+                            phase: "queued",
+                            phase_started_at: new Date().toISOString(),
+                            started_at: new Date().toISOString(),
+                            completed_at: null,
+                          });
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "Could not delete document");
+                        } finally {
+                          setDeletingDocumentId(null);
+                        }
+                      }}
+                      type="button"
+                    >
+                      {deletingDocumentId === doc.id ? "Deleting…" : "Delete"}
+                    </button>
                   </div>
                 ))}
               </div>
