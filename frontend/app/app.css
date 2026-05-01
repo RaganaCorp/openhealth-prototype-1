@@ -156,6 +156,31 @@ select {
   background: var(--color-surface-elevated);
 }
 
+.tab-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+  border-radius: 0;
+}
+
+.tab-button:hover {
+  color: var(--color-text-primary);
+}
+
+.tab-button.active {
+  color: var(--color-text-primary);
+  border-bottom-color: var(--color-primary);
+  font-weight: 500;
+}
+
 .field-group {
   display: grid;
   gap: 0.5rem;

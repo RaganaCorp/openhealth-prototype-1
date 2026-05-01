@@ -204,24 +204,24 @@ export default function PatientPage() {
         </aside>
 
         <section className="panel-card flex h-[calc(100vh-8.75rem)] min-h-[640px] flex-col animate-fade-up [animation-delay:110ms]">
-          <div className="mb-4 border-b border-border/80 pb-4">
-            <div className="flex flex-wrap gap-2">
+          <div className="mb-4 border-b border-border/80 pb-2">
+            <div className="flex">
               <button
-                className={activeTab === "summary" ? "button-primary px-3 py-2 text-xs" : "button-secondary px-3 py-2 text-xs"}
+                className={`tab-button ${activeTab === "summary" ? "active" : ""}`}
                 onClick={() => setActiveTab("summary")}
                 type="button"
               >
                 Summary
               </button>
               <button
-                className={activeTab === "chat" ? "button-primary px-3 py-2 text-xs" : "button-secondary px-3 py-2 text-xs"}
+                className={`tab-button ${activeTab === "chat" ? "active" : ""}`}
                 onClick={() => setActiveTab("chat")}
                 type="button"
               >
                 Chat
               </button>
               <button
-                className={activeTab === "files" ? "button-primary px-3 py-2 text-xs" : "button-secondary px-3 py-2 text-xs"}
+                className={`tab-button ${activeTab === "files" ? "active" : ""}`}
                 onClick={() => setActiveTab("files")}
                 type="button"
               >
