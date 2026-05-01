@@ -75,6 +75,13 @@ export type PatientDocument = {
   size: number;
 };
 
+export type SummaryOverrides = {
+  active_conditions: string;
+  current_medications: string;
+  recent_procedures: string;
+  key_concerns: string;
+};
+
 export type AppConfig = {
   model: string;
   embedding_model: string;
@@ -228,6 +235,17 @@ export function getSummary(patientId: string) {
 
 export function regenerateSummary(patientId: string) {
   return request<{ summary: string }>(`/summary/${patientId}`, { method: "POST" });
+}
+
+export function getSummaryOverrides(patientId: string) {
+  return request<SummaryOverrides>(`/summary-overrides/${patientId}`);
+}
+
+export function updateSummaryOverrides(patientId: string, overrides: SummaryOverrides) {
+  return request<SummaryOverrides>(`/summary-overrides/${patientId}`, {
+    method: "POST",
+    body: JSON.stringify(overrides),
+  });
 }
 
 export function getChatSessions(patientId: string) {

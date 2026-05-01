@@ -333,6 +333,11 @@ async def _run_incremental(
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         all_doc_records = list(updated_docs.values())
         await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
+        await asyncio.to_thread(
+            docs_module.upsert_summary_overrides_section,
+            patient_folder,
+            record.get("summary_overrides"),
+        )
 
         # Update patient.json.
         record["documents"] = all_doc_records
@@ -343,7 +348,10 @@ async def _run_incremental(
         # Regenerate timeline and summary only if files were processed.
         if files_to_process:
             _set_phase(job, "generating_summary", "summary")
-            record["summary"] = await tl.generate_summary(patient_md_text)
+            record["summary"] = await tl.generate_summary(
+                patient_md_text,
+                record.get("summary_overrides"),
+            )
 
         _set_phase(job, "saving", "patient.json")
         await pt.save_patient_record(record)
@@ -396,6 +404,11 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         await asyncio.to_thread(_rebuild_patient_md, patient_folder, new_docs)
+        await asyncio.to_thread(
+            docs_module.upsert_summary_overrides_section,
+            patient_folder,
+            record.get("summary_overrides"),
+        )
 
         patient_md_text = await asyncio.to_thread(
             docs_module.read_patient_md, patient_folder
@@ -403,7 +416,10 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
         record["documents"] = new_docs
         _set_phase(job, "generating_summary", "summary")
-        record["summary"] = await tl.generate_summary(patient_md_text)
+        record["summary"] = await tl.generate_summary(
+            patient_md_text,
+            record.get("summary_overrides"),
+        )
 
         _set_phase(job, "saving", "patient.json")
         await pt.save_patient_record(record)

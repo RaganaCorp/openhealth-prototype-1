@@ -76,6 +76,11 @@ Do not contradict or omit items listed below. Do not add facts not present here.
 
 {structured_data}
 
+Caregiver corrections by section (if provided) are listed below.
+Treat these as preferred emphasis/wording while staying faithful to the record evidence.
+
+{corrections_block}
+
 Write the summary using exactly these five section headers in this order.
 
 ## Overview
@@ -204,6 +209,22 @@ Return only the document type label, nothing else.
 # ---------------------------------------------------------------------------
 # JSON parsing helper
 # ---------------------------------------------------------------------------
+
+_REFUSAL_PHRASES = (
+    "i am unable to provide",
+    "i cannot process",
+    "i can't provide",
+    "i cannot summarize",
+    "i'm not able to",
+    "sensitive and potentially confidential",
+    "i cannot assist with",
+)
+
+
+def _is_refusal_response(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _REFUSAL_PHRASES)
+
 
 def _parse_json_response(text: str, fallback: Any = None) -> Any:
     """Extract JSON from a code-fenced LLM response."""
@@ -751,15 +772,47 @@ async def generate_timeline(patient_id: str, patient_md: str) -> list[dict]:
     return events
 
 
-async def generate_summary(patient_md: str) -> str:
+def _build_corrections_block(summary_overrides: dict | None) -> str:
+    if not summary_overrides:
+        return "No section-level caregiver corrections provided."
+
+    rows = [
+        ("Active Conditions", str(summary_overrides.get("active_conditions", "")).strip()),
+        ("Current Medications", str(summary_overrides.get("current_medications", "")).strip()),
+        ("Recent Procedures", str(summary_overrides.get("recent_procedures", "")).strip()),
+        ("Key Concerns", str(summary_overrides.get("key_concerns", "")).strip()),
+    ]
+    if not any(value for _, value in rows):
+        return "No section-level caregiver corrections provided."
+
+    return "\n".join([
+        f"- {label}: {value if value else '(none)'}"
+        for label, value in rows
+    ])
+
+
+async def generate_summary(patient_md: str, summary_overrides: dict | None = None) -> str:
     """Two-pass LLM summary: Pass 1 extracts structured data, Pass 2 generates prose."""
     if not patient_md.strip():
         return ""
 
+    _SUMMARY_SYSTEM_MSG = (
+        "You are a clinical documentation assistant helping authorized caregivers "
+        "organize and understand their care recipient's medical records. "
+        "All data has been provided by the authorized caregiver for their own use. "
+        "You must complete every task fully and output exactly the format requested."
+    )
+    _summary_messages_prefix = [{"role": "system", "content": _SUMMARY_SYSTEM_MSG}]
+
     # Pass 1 — structured extraction from raw records.
     # Use raw patient_md (not pre-filtered) so all clinical sections reach the model.
     extract_prompt = _EXTRACTION_PASS1_PROMPT.format(patient_md=patient_md[:30000])
-    extract_response = await ai.chat_complete([{"role": "user", "content": extract_prompt}])
+    extract_response = await ai.chat_complete(
+        _summary_messages_prefix + [{"role": "user", "content": extract_prompt}]
+    )
+    if _is_refusal_response(extract_response):
+        _logger.warning("summary extraction pass returned a refusal; skipping LLM extraction")
+        extract_response = "{}"
     structured = _parse_json_response(extract_response, fallback={})
     if not isinstance(structured, dict):
         structured = {}
@@ -774,8 +827,18 @@ async def generate_summary(patient_md: str) -> str:
 
     # Pass 2 — prose generation from pre-extracted facts.
     structured_block = _build_structured_input(structured)
-    prose_prompt = _SUMMARY_PROSE_PROMPT.format(structured_data=structured_block)
-    prose_response = await ai.chat_complete([{"role": "user", "content": prose_prompt}])
+    corrections_block = _build_corrections_block(summary_overrides)
+    prose_prompt = _SUMMARY_PROSE_PROMPT.format(
+        structured_data=structured_block,
+        corrections_block=corrections_block,
+    )
+    prose_response = await ai.chat_complete(
+        _summary_messages_prefix + [{"role": "user", "content": prose_prompt}]
+    )
+    # Detect refusal from the prose pass; fall back to injecting pass-1 data directly.
+    if _is_refusal_response(prose_response):
+        _logger.warning("summary prose pass returned a refusal; using pass-1 fallback only")
+        prose_response = ""
     summary = _sanitize_summary_output(prose_response)
 
     # Fallback: if LLM dropped a section that had pass-1 data, inject items directly.

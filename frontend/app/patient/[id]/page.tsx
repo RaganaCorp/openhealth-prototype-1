@@ -248,7 +248,11 @@ export default function PatientPage() {
 
           {activeTab === "summary" ? (
             <div className="panel-scroll flex-1">
-              <SummaryPanel summary={summary} />
+              <SummaryPanel
+                onSummaryUpdated={(nextSummary) => setSummary(nextSummary)}
+                patientId={patient.id}
+                summary={summary}
+              />
             </div>
           ) : null}
 

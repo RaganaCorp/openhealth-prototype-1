@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import ai
+import documents as docs_module
 import jobs
 import memory
 import patients as pt
@@ -131,6 +132,23 @@ class ConfigUpdateRequest(BaseModel):
     ollama_base_url: Optional[str] = None
     grounding_enabled: Optional[bool] = None
     grounding_max_retries: Optional[int] = None
+
+
+class SummaryOverridesRequest(BaseModel):
+    active_conditions: str = ""
+    current_medications: str = ""
+    recent_procedures: str = ""
+    key_concerns: str = ""
+
+
+def _normalize_summary_overrides(raw: Optional[dict]) -> dict:
+    src = raw or {}
+    return {
+        "active_conditions": str(src.get("active_conditions", "") or ""),
+        "current_medications": str(src.get("current_medications", "") or ""),
+        "recent_procedures": str(src.get("recent_procedures", "") or ""),
+        "key_concerns": str(src.get("key_concerns", "") or ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -344,17 +362,45 @@ async def get_summary(patient_id: str):
     return {"summary": record.get("summary", "")}
 
 
+@app.get("/summary-overrides/{patient_id}")
+async def get_summary_overrides(patient_id: str):
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+    return _normalize_summary_overrides(record.get("summary_overrides"))
+
+
+@app.post("/summary-overrides/{patient_id}")
+async def update_summary_overrides(patient_id: str, body: SummaryOverridesRequest):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+
+    record = await pt.load_patient_record(patient_id)
+    if record is None:
+        raise _http_404("Patient not found")
+
+    overrides = _normalize_summary_overrides(body.model_dump())
+    record["summary_overrides"] = overrides
+    await pt.save_patient_record(record)
+
+    patient_folder = Path(entry["folder_path"])
+    await asyncio.to_thread(docs_module.upsert_summary_overrides_section, patient_folder, overrides)
+    return overrides
+
+
 @app.post("/summary/{patient_id}")
 async def regenerate_summary(patient_id: str):
     entry = await pt.find_patient_by_id(patient_id)
     if entry is None:
         raise _http_404("Patient not found")
 
-    from documents import read_patient_md
-    patient_md = await asyncio.to_thread(read_patient_md, Path(entry["folder_path"]))
-    summary = await tl.generate_summary(patient_md)
+    patient_md = await asyncio.to_thread(docs_module.read_patient_md, Path(entry["folder_path"]))
 
     record = await pt.load_patient_record(patient_id)
+    overrides = None if record is None else record.get("summary_overrides")
+    summary = await tl.generate_summary(patient_md, overrides)
+
     if record:
         record["summary"] = summary
         await pt.save_patient_record(record)
