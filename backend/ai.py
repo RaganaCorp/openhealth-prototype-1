@@ -169,11 +169,14 @@ async def embed(text: str) -> list[float]:
 async def chat_complete(
     messages: list[dict[str, str]],
     model: str | None = None,
+    num_ctx: int | None = None,
 ) -> str:
     cfg = load_config()
     effective_model = model or cfg.chat_model
     endpoint = "/api/chat"
-    request_payload = {"model": effective_model, "messages": messages, "stream": False}
+    request_payload: dict[str, Any] = {"model": effective_model, "messages": messages, "stream": False}
+    if num_ctx and num_ctx > 0:
+        request_payload["options"] = {"num_ctx": num_ctx}
     _logger.info(
         "ollama chat request endpoint=%s model=%s payload=%s",
         endpoint,

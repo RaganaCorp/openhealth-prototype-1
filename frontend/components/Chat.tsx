@@ -189,9 +189,6 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                   ) : (
                     <p className="whitespace-pre-wrap text-sm leading-7">{message.content}</p>
                   )}
-                  {!isAssistant && message.localStatus === "pending" ? (
-                    <div className="mt-3 text-xs text-text-secondary">Sending...</div>
-                  ) : null}
                   {!isAssistant && message.localStatus === "failed" ? (
                     <div className="mt-3 text-xs text-error">Failed to send. Please retry.</div>
                   ) : null}

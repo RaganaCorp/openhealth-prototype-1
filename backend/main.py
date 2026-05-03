@@ -666,24 +666,35 @@ async def chat(body: ChatRequest):
         )
 
         # 5. Assemble prompt.
-        system_prompt = (
+        # Patient data (summary + records) goes in the SYSTEM message so that
+        # small instruction-tuned models treat it as pre-loaded background
+        # knowledge rather than something the user is asking them to process.
+        # Only the conversational elements (state, history, question) go in
+        # the USER turn.
+        patient_summary = (record.get("summary") or "").strip()
+
+        system_parts = [
             "You are OpenHealth, a knowledgeable and compassionate medical AI assistant.\n"
-            "You have been given the full medical record for this patient as context.\n"
-            "Use the documents to ground your responses — interpret, explain, and connect information across them.\n"
+            "The patient's medical record and a synthesised summary are provided below.\n"
+            "Use both to ground your responses — interpret, explain, and connect information across them.\n"
             "When referencing specific information, cite the source document.\n"
             "Be direct, warm, and clear. Write in paragraphs, not bullet points.\n"
             "You are not limited to only what is in the documents — use your medical knowledge\n"
             "to help the user understand, interpret, and act on what the records contain."
-        )
+        ]
+        if patient_summary:
+            system_parts.append(f"\n\n--- PATIENT SUMMARY (generated, may include caregiver corrections) ---\n{patient_summary}")
+        if patient_context:
+            system_parts.append(f"\n\n--- PATIENT RECORDS ---\n{patient_context}")
+
+        system_prompt = "\n".join(system_parts)
 
         user_content_parts = []
-        if patient_context:
-            user_content_parts.append(f"PATIENT RECORDS:\n{patient_context}")
         if state_capsule:
             user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
         if history_text:
             user_content_parts.append(f"RELEVANT PRIOR EXCHANGES:\n{history_text}")
-        user_content_parts.append(f"USER QUESTION:\n{user_message}")
+        user_content_parts.append(user_message)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -694,7 +705,7 @@ async def chat(body: ChatRequest):
         draft_model = cfg.clinical_model if cfg.routing_mode.lower().strip() == "strict" else cfg.chat_model
 
         # 6. Generate response.
-        draft = await ai.chat_complete(messages, model=draft_model)
+        draft = await ai.chat_complete(messages, model=draft_model, num_ctx=effective_ctx_tokens)
 
         # 7. Grounding verification.
         grounding_retried = False
