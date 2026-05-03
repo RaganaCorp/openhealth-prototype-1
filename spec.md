@@ -45,7 +45,9 @@
 
 This solution needs to be easily copied and run locally by people who likely don't have python or node knowledge (or the rest). Docker Compose handles all components and wires them together.
 
-**Ollama** is handled by the platform installer (`install.ps1` on Windows, `install.sh` on macOS). The installer detects whether Ollama is already present; if not, it offers to install it via `winget` (Windows) or `brew` (macOS), or falls back to a bundled Ollama Docker container if the user declines. After resolving Ollama, the installer pulls all required models from `backend/config.defaults.json` before the user ever runs `docker compose up`. Four compose variants live in `docker/` — the installer copies the correct one to `docker-compose.yml` (git-ignored) based on platform and Ollama choice.
+**Runtime distribution** uses Ragana-published container images by default (`ghcr.io/ragana/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` and `ghcr.io/ragana/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}`), so most users can pull and run without local builds.
+
+**Ollama** is handled by the platform installer (`install.ps1` on Windows, `install.sh` on macOS). The installer detects whether Ollama is already present; if not, it offers to install it via `winget` (Windows) or `brew` (macOS), or falls back to a bundled Ollama Docker container if the user declines. After resolving Ollama, the installer pulls all required models from `backend/config.defaults.json` before the user ever runs `docker compose up`. Four runtime compose variants live in `docker/` — the installer copies the correct one to `docker-compose.yml` (git-ignored) based on platform and Ollama choice. Developers who want source builds can layer `docker/docker-compose.local-build.override.yml`.
 
 **Patient creation** — the user provides a name in the UI. The backend slugifies the name (e.g. "Mary Johnson" → `mary-johnson`) and creates `./data/patients/mary-johnson/` automatically. No folder path is entered by the user. If a folder with that slug already exists (e.g. a second patient named "John Smith" when `john-smith` is taken), a numeric counter is appended: `john-smith-2`, `john-smith-3`, etc. After the patient is created, the user is immediately presented with a file upload interface to drop or select files from their computer. Uploaded files are written by the backend into the patient's folder inside the Docker-mounted volume. Upload completion automatically triggers ingestion.
 
@@ -472,7 +474,8 @@ openhealth/
 │   ├── docker-compose.windows-ollama-docker.yml
 │   ├── docker-compose.windows-ollama-host.yml
 │   ├── docker-compose.mac-ollama-docker.yml
-│   └── docker-compose.mac-ollama-host.yml
+│   ├── docker-compose.mac-ollama-host.yml
+│   └── docker-compose.local-build.override.yml
 └── data/                        # bind-mounted volume (git-ignored)
     ├── config/
     │   └── config.json

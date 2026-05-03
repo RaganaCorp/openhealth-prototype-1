@@ -1,0 +1,18 @@
+# OpenHealth local developer override
+# Usage:
+#   docker compose -f docker-compose.yml -f docker/docker-compose.local-build.override.yml up --build
+#
+# This overrides published images with local source builds for frontend/backend.
+
+services:
+  frontend:
+    image: openhealth-prototype1-frontend:local
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+  backend:
+    image: openhealth-prototype1-backend:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
