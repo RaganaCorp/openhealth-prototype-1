@@ -9,7 +9,7 @@ networks:
 
 services:
   frontend:
-    image: ghcr.io/ragana/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
+    image: ghcr.io/raganacorp/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
     ports:
       - "3000:3000"
     environment:
@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
 
   backend:
-    image: ghcr.io/ragana/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
+    image: ghcr.io/raganacorp/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
     ports:
       - "8000:8000"
     environment:

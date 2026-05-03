@@ -18,8 +18,8 @@ Source of truth for `docker-compose.yml` and the overall runtime environment. Se
 
 | Service | Image | Port | Notes |
 |---|---|---|---|
-| `frontend` | `ghcr.io/ragana/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` | `3000:3000` | Next.js, served via `next start` |
-| `backend` | `ghcr.io/ragana/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` | `8000:8000` | FastAPI + Uvicorn |
+| `frontend` | `ghcr.io/raganacorp/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` | `3000:3000` | Next.js, served via `next start` |
+| `backend` | `ghcr.io/raganacorp/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` | `8000:8000` | FastAPI + Uvicorn |
 | `ollama` | `ollama/ollama:latest` | `11434:11434` | Only present in "ollama in Docker" variants |
 
 ChromaDB runs **in-process** inside the backend container (Python library, no separate service). The vector store is persisted to `./data/memory_db/` via the bind mount.
@@ -70,7 +70,7 @@ Optional developer override:
 
 ### Differences between variants
 
-- **Published app images**: all runtime variants use `ghcr.io/ragana/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` and `ghcr.io/ragana/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}`.
+- **Published app images**: all runtime variants use `ghcr.io/raganacorp/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` and `ghcr.io/raganacorp/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}`.
 - **Ollama-in-Docker variants**: include the `ollama` service with `image: ollama/ollama:latest` and expose port `11434`. `OLLAMA_BASE_URL` is set to `http://ollama:11434` (internal network).
 - **Ollama-on-host variants**: no `ollama` service. `OLLAMA_BASE_URL` is set to `http://host.docker.internal:11434`. No `11434` port exposure.
 - **Windows vs macOS**: differences are limited to `extra_hosts` entries and any platform-specific volume path handling required by Docker Desktop.

@@ -45,7 +45,7 @@
 
 This solution needs to be easily copied and run locally by people who likely don't have python or node knowledge (or the rest). Docker Compose handles all components and wires them together.
 
-**Runtime distribution** uses Ragana-published container images by default (`ghcr.io/ragana/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` and `ghcr.io/ragana/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}`), so most users can pull and run without local builds.
+**Runtime distribution** uses Ragana-published container images by default (`ghcr.io/raganacorp/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}` and `ghcr.io/raganacorp/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}`), so most users can pull and run without local builds.
 
 **Ollama** is handled by the platform installer (`install.ps1` on Windows, `install.sh` on macOS). The installer detects whether Ollama is already present; if not, it offers to install it via `winget` (Windows) or `brew` (macOS), or falls back to a bundled Ollama Docker container if the user declines. After resolving Ollama, the installer pulls all required models from `backend/config.defaults.json` before the user ever runs `docker compose up`. Four runtime compose variants live in `docker/` — the installer copies the correct one to `docker-compose.yml` (git-ignored) based on platform and Ollama choice. Developers who want source builds can layer `docker/docker-compose.local-build.override.yml`.
 
