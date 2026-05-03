@@ -261,7 +261,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
               setThinking({ visible: true, text: thinkingContent, sessionId: targetSessionId });
               await new Promise((r) => setTimeout(r, 800));
             }
-            setThinking({ visible: false, text: null });
+            setThinking({ visible: false, text: null, sessionId: null });
             setRefinedResponseContent(response.grounding_retried ? response.response : null);
             setMessages((current) => current.filter((m) => m.id !== localUserId));
             await loadMessages(targetSessionId);
