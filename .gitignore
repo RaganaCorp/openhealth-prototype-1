@@ -1,5 +1,6 @@
 # Local dev data
 data/
+data-test/
 
 # Node
 node_modules/
@@ -16,3 +17,6 @@ venv/
 
 # Env
 .env
+
+# IDE stuff
+.vscode
