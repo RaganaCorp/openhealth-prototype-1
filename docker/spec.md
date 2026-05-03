@@ -72,25 +72,65 @@ Four compose files live in the `docker/` directory. The installer copies the cor
 
 Two installer scripts live in the project root. They perform pre-flight checks, select the correct compose variant, and copy it to `docker-compose.yml`.
 
+### Model List Resolution
+
+Both installers derive the required Ollama models from `backend/config.defaults.json` at install time. They read the fields `chat_model`, `clinical_model`, `summary_model`, `verification_model`, and `embedding_model`, deduplicate, and use the resulting list for `ollama pull` calls.
+
 ### Windows — `install.ps1` (PowerShell)
 
 **Steps:**
-1. Check Docker is installed (`docker --version`). If not found, print instructions to install Docker Desktop and exit.
-2. Check Docker daemon is running (`docker info`). If not running, prompt user to start Docker Desktop and exit.
-3. Ask the user whether Ollama is already running on this machine (Y/N prompt).
-   - If **Yes**: copy `docker/docker-compose.windows-ollama-host.yml` → `docker-compose.yml`.
-   - If **No**: copy `docker/docker-compose.windows-ollama-docker.yml` → `docker-compose.yml`.
+1. Check Docker is installed (`docker --version`). If not found:
+   - Explain to the user that Docker Desktop is required and ask if they would like to install it now (Y/N prompt).
+   - If **No**: print the manual download URL (`https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe`) and exit.
+   - If **Yes**: check whether `winget` is available.
+     - If **winget available**: run `winget install Docker.DockerDesktop` (a UAC prompt will appear). After install completes, tell the user to launch Docker Desktop from the Start menu and wait for it to finish starting, then prompt the user to press Enter to continue.
+     - If **winget not available**: print the manual download URL (`https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe`) and exit.
+2. Check Docker daemon is running (`docker info`). If not running, prompt user to start Docker Desktop and exit (they may need to log out and back in after a fresh install for the PATH to update; note this in the message).
+3. Check whether Ollama is already installed on this machine (`ollama --version`).
+   - If **found** (Ollama on host):
+     - Copy `docker/docker-compose.windows-ollama-host.yml` → `docker-compose.yml`.
+     - Pull each required model (`ollama pull <model>`). Print progress for each.
+   - If **not found**: explain that Ollama is required and ask the user whether they would like to install it now (Y/N prompt).
+     - If **Yes**: check whether `winget` is available.
+       - If **winget available**: run `winget install Ollama.Ollama`. After install, refresh the PATH in the current session and verify `ollama --version` succeeds.
+       - If **winget not available**: print the manual download URL (`https://ollama.com/download/windows`) and exit.
+       - Copy `docker/docker-compose.windows-ollama-host.yml` → `docker-compose.yml`.
+       - Pull each required model (`ollama pull <model>`). Print progress for each.
+     - If **No** (use bundled Ollama container):
+       - Copy `docker/docker-compose.windows-ollama-docker.yml` → `docker-compose.yml`.
+       - Run `docker compose up -d ollama` to start just the Ollama container.
+       - Wait up to 30 seconds for the Ollama service to become responsive (poll `http://localhost:11434` or use `docker compose ps`).
+       - Pull each required model via `docker exec ollama ollama pull <model>`. Print progress for each.
+       - Run `docker compose stop ollama` so the full `docker compose up` starts everything cleanly together.
 4. Create `./data/` directory if it does not exist.
 5. Print next steps: `docker compose up` and open `http://localhost:3000`.
 
 ### macOS — `install.sh` (Bash)
 
 **Steps:**
-1. Check Docker is installed (`docker --version`). If not found, print instructions to install Docker Desktop and exit.
-2. Check Docker daemon is running (`docker info`). If not running, prompt user to start Docker Desktop and exit.
-3. Ask the user whether Ollama is already running on this machine (Y/N prompt).
-   - If **Yes**: copy `docker/docker-compose.mac-ollama-host.yml` → `docker-compose.yml`.
-   - If **No**: copy `docker/docker-compose.mac-ollama-docker.yml` → `docker-compose.yml`.
+1. Check Docker is installed (`docker --version`). If not found:
+   - Explain to the user that Docker Desktop is required and ask if they would like to install it now (Y/N prompt).
+   - If **No**: print the manual download URL (`https://www.docker.com/products/docker-desktop/`) and exit.
+   - If **Yes**: check whether `brew` is available.
+     - If **Homebrew available**: run `brew install --cask docker`. After install completes, tell the user to launch Docker Desktop from Applications and wait for it to finish starting, then prompt the user to press Enter to continue.
+     - If **Homebrew not available**: print the manual download URL (`https://www.docker.com/products/docker-desktop/`) and exit.
+2. Check Docker daemon is running (`docker info`). If not running, prompt user to launch Docker Desktop from Applications and press Enter to retry.
+3. Check whether Ollama is already installed on this machine (`ollama --version`).
+   - If **found** (Ollama on host):
+     - Copy `docker/docker-compose.mac-ollama-host.yml` → `docker-compose.yml`.
+     - Pull each required model (`ollama pull <model>`). Print progress for each.
+   - If **not found**: explain that Ollama is required and ask the user whether they would like to install it now (Y/N prompt).
+     - If **Yes**: check whether `brew` is available.
+       - If **Homebrew available**: run `brew install ollama`. After install, verify `ollama --version` succeeds.
+       - If **Homebrew not available**: print the manual download URL (`https://ollama.com/download/mac`) and exit.
+       - Copy `docker/docker-compose.mac-ollama-host.yml` → `docker-compose.yml`.
+       - Pull each required model (`ollama pull <model>`). Print progress for each.
+     - If **No** (use bundled Ollama container):
+       - Copy `docker/docker-compose.mac-ollama-docker.yml` → `docker-compose.yml`.
+       - Run `docker compose up -d ollama` to start just the Ollama container.
+       - Wait up to 30 seconds for the Ollama service to become responsive.
+       - Pull each required model via `docker exec ollama ollama pull <model>`. Print progress for each.
+       - Run `docker compose stop ollama` so the full `docker compose up` starts everything cleanly together.
 4. Create `./data/` directory if it does not exist.
 5. Print next steps: `docker compose up` and open `http://localhost:3000`.
 
@@ -186,11 +226,12 @@ openhealth/
 
 1. User runs `install.ps1` (Windows) or `install.sh` (macOS).
 2. Installer checks Docker, selects compose variant, copies to `docker-compose.yml`.
-3. User runs `docker compose up`.
-4. Backend starts, checks for `./data/config/config.json` — creates it with defaults if absent.
-5. Backend starts `watchdog` watcher for any existing patient folders.
-6. Frontend starts; home page loads patients from `GET /patients`.
-7. If using bundled Ollama: model pull is required on first use (Ollama pulls on first inference call).
+3. Installer pulls required Ollama models (from `backend/config.defaults.json`) — either via the host `ollama` CLI or by briefly starting the bundled Ollama container. This is the longest step; the installer prints per-model progress.
+4. User runs `docker compose up`.
+5. Backend starts, checks for `./data/config/config.json` — creates it with defaults if absent.
+6. Backend starts `watchdog` watcher for any existing patient folders.
+7. Frontend starts; home page loads patients from `GET /patients`.
+8. All required models are already present in Ollama; no model download happens on first inference.
 
 ---
 
