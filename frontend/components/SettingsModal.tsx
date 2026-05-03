@@ -9,6 +9,54 @@ type SettingsModalProps = {
   onClose: () => void;
 };
 
+function pickFastModel(installedModels: string[], currentModel: string): string {
+  const normalized = installedModels.map((model) => ({
+    raw: model,
+    lower: model.toLowerCase(),
+  }));
+
+  const preferred = [
+    /(gemma-4|gemma4).*(e2b|2b).*(q4|q5)/,
+    /(gemma-4|gemma4).*(e4b|4b).*(q4|q5)/,
+    /(gemma-4|gemma4).*(e2b|2b)/,
+    /(gemma-4|gemma4).*(e4b|4b)/,
+    /gemma3.*4b.*(q4|q5)/,
+    /(gemma).*(2b|3b|4b).*(q4|q5)/,
+  ];
+
+  for (const pattern of preferred) {
+    const match = normalized.find((entry) => pattern.test(entry.lower));
+    if (match) {
+      return match.raw;
+    }
+  }
+
+  return currentModel;
+}
+
+function pickMedicalModel(installedModels: string[], currentModel: string): string {
+  const normalized = installedModels.map((model) => ({
+    raw: model,
+    lower: model.toLowerCase(),
+  }));
+
+  const preferred = [
+    /medgemma.*1\.5.*4b.*(q4|q5)/,
+    /medgemma.*4b.*(q4|q5)/,
+    /medgemma.*1\.5.*4b/,
+    /medgemma.*4b/,
+  ];
+
+  for (const pattern of preferred) {
+    const match = normalized.find((entry) => pattern.test(entry.lower));
+    if (match) {
+      return match.raw;
+    }
+  }
+
+  return currentModel;
+}
+
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -78,14 +126,20 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 setSaving(true);
                 setError(null);
                 await updateConfig({
-                  model: config.model,
+                  chat_model: config.chat_model,
+                  clinical_model: config.clinical_model,
+                  summary_model: config.summary_model,
+                  verification_model: config.verification_model,
                   embedding_model: config.embedding_model,
                   chunk_size: config.chunk_size,
                   chunk_overlap: config.chunk_overlap,
+                  memory_results: config.memory_results,
                   grounding_enabled: config.grounding_enabled,
                   grounding_max_retries: config.grounding_max_retries,
                   context_window_tokens: config.context_window_tokens,
                   ollama_base_url: config.ollama_base_url,
+                  routing_mode: config.routing_mode,
+                  medgemma_verification_enabled: config.medgemma_verification_enabled,
                 });
                 onClose();
               } catch (err) {
@@ -95,9 +149,77 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               }
             }}
           >
+            <div className="rounded-xl border border-border bg-surface-elevated/70 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="field-label">Laptop preset</p>
+                  <p className="mt-1 text-sm text-text-secondary">Uses Gemma for fast drafting, MedGemma for specialist checks, and balanced routing.</p>
+                </div>
+                <button
+                  className="button-secondary"
+                  onClick={() => {
+                    const fastModel = pickFastModel(models, config.chat_model);
+                    const medicalModel = pickMedicalModel(models, config.clinical_model);
+                    setConfig({
+                      ...config,
+                      chat_model: fastModel,
+                      clinical_model: medicalModel,
+                      summary_model: medicalModel,
+                      verification_model: medicalModel,
+                      routing_mode: "balanced",
+                      medgemma_verification_enabled: true,
+                      chunk_size: 750,
+                      chunk_overlap: 80,
+                      memory_results: 8,
+                      context_window_tokens: 32000,
+                      grounding_max_retries: 1,
+                    });
+                  }}
+                  type="button"
+                >
+                  Apply hybrid preset
+                </button>
+              </div>
+            </div>
+
             <label className="field-group">
-              <span className="field-label">Model</span>
-              <select className="field-input" onChange={(event) => setConfig({ ...config, model: event.target.value })} value={config.model}>
+              <span className="field-label">Chat model (fast path)</span>
+              <select className="field-input" onChange={(event) => setConfig({ ...config, chat_model: event.target.value })} value={config.chat_model}>
+                {models.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="field-group">
+                <span className="field-label">Clinical model</span>
+                <select className="field-input" onChange={(event) => setConfig({ ...config, clinical_model: event.target.value })} value={config.clinical_model}>
+                  {models.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field-group">
+                <span className="field-label">Summary model</span>
+                <select className="field-input" onChange={(event) => setConfig({ ...config, summary_model: event.target.value })} value={config.summary_model}>
+                  {models.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <label className="field-group">
+              <span className="field-label">Verification model</span>
+              <select className="field-input" onChange={(event) => setConfig({ ...config, verification_model: event.target.value })} value={config.verification_model}>
                 {models.map((model) => (
                   <option key={model} value={model}>
                     {model}
@@ -156,6 +278,37 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 />
               </label>
               <label className="field-group">
+                <span className="field-label">Memory results</span>
+                <input
+                  className="field-input"
+                  min={1}
+                  onChange={(event) => setConfig({ ...config, memory_results: Number(event.target.value) })}
+                  type="number"
+                  value={config.memory_results}
+                />
+              </label>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="field-group">
+                <span className="field-label">Routing mode</span>
+                <select
+                  className="field-input"
+                  onChange={(event) =>
+                    setConfig({
+                      ...config,
+                      routing_mode: event.target.value as "fast" | "balanced" | "strict",
+                    })
+                  }
+                  value={config.routing_mode}
+                >
+                  <option value="fast">fast</option>
+                  <option value="balanced">balanced</option>
+                  <option value="strict">strict</option>
+                </select>
+              </label>
+
+              <label className="field-group">
                 <span className="field-label">Context window tokens</span>
                 <input
                   className="field-input"
@@ -174,6 +327,19 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChange={(event) => setConfig({ ...config, ollama_base_url: event.target.value })}
                 type="text"
                 value={config.ollama_base_url}
+              />
+            </label>
+
+            <label className="toggle-row">
+              <span>
+                <span className="field-label block">MedGemma verification enabled</span>
+                <span className="mt-1 block text-sm text-text-secondary">When enabled, high-risk or strict-mode turns run specialist verification.</span>
+              </span>
+              <input
+                checked={config.medgemma_verification_enabled}
+                className="h-5 w-5 accent-[var(--color-primary)]"
+                onChange={(event) => setConfig({ ...config, medgemma_verification_enabled: event.target.checked })}
+                type="checkbox"
               />
             </label>
 

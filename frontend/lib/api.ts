@@ -83,7 +83,10 @@ export type SummaryOverrides = {
 };
 
 export type AppConfig = {
-  model: string;
+  chat_model: string;
+  clinical_model: string;
+  summary_model: string;
+  verification_model: string;
   embedding_model: string;
   embed_timeout_seconds: number;
   chat_timeout_seconds: number;
@@ -94,6 +97,8 @@ export type AppConfig = {
   context_window_tokens: number;
   data_path: string;
   ollama_base_url: string;
+  routing_mode: "fast" | "balanced" | "strict";
+  medgemma_verification_enabled: boolean;
   grounding_enabled: boolean;
   grounding_max_retries: number;
 };
