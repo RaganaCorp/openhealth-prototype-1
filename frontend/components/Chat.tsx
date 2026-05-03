@@ -302,6 +302,15 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             disabled={loading || Boolean(activeJobId)}
             id="chat-input"
             onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.ctrlKey && !event.shiftKey && !event.metaKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              } else if (event.key === "Enter" && event.ctrlKey) {
+                event.preventDefault();
+                setDraft((d) => d + "\n");
+              }
+            }}
             placeholder={activeJobId ? "Wait for ingestion to finish before sending a message." : "What should I understand from the latest lab results?"}
             value={draft}
           />

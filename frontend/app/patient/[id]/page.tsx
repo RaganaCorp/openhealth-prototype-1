@@ -173,6 +173,7 @@ export default function PatientPage() {
               <button
                 className="button-secondary whitespace-nowrap px-4 py-2 text-sm"
                 onClick={() => {
+                  setActiveTab("chat");
                   startTransition(() => {
                     router.push(`/patient/${patient.id}?session=new`);
                   });
@@ -184,7 +185,11 @@ export default function PatientPage() {
             </div>
 
             <div className="mt-4 space-y-2">
-              {sessions.map((session) => (
+              {[...sessions].sort((a, b) => {
+                const aTime = a.last_message_at ?? a.created_at ?? "";
+                const bTime = b.last_message_at ?? b.created_at ?? "";
+                return bTime.localeCompare(aTime);
+              }).map((session) => (
                 <button
                   className={`session-tile ${session.id === activeSession?.id ? "session-tile-active" : ""}`}
                   key={session.id}
