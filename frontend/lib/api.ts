@@ -285,9 +285,9 @@ export function sendChat(patientId: string, chatSessionId: string, message: stri
   return request<{
     response: string;
     grounding_retried: boolean;
-    retry_count: number;
+    thinking?: string;
     citations: Citation[];
-  }>("/chat", {
+  }>(`/chat`, {
     method: "POST",
     body: JSON.stringify({ patient_id: patientId, chat_session_id: chatSessionId, message }),
   });

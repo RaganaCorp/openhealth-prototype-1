@@ -24,7 +24,32 @@ type ChatProps = {
 
 type LocalChatMessage = ChatMessage & {
   localStatus?: "pending" | "failed";
+  localSessionId?: string;
 };
+
+function ThinkingBubble({ text }: { text: string | null }) {
+  return (
+    <article className="message-row justify-start">
+      <div className="message-bubble message-bubble-assistant">
+        {text === null ? (
+          <div className="thinking-dots" aria-label="Thinking">
+            <span /><span /><span />
+          </div>
+        ) : (
+          <>
+            <div className="thinking-dots" aria-label="Thinking">
+              <span /><span /><span />
+            </div>
+            <details className="thinking-disclosure">
+              <summary>Thinking…</summary>
+              <div className="thinking-disclosure-body">{text}</div>
+            </details>
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
 
 export function Chat({ patientId, session, activeJobId, onCreateSession, onSessionChanged }: ChatProps) {
   const [messages, setMessages] = useState<LocalChatMessage[]>([]);
@@ -35,6 +60,11 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [refinedResponseContent, setRefinedResponseContent] = useState<string | null>(null);
+  const [thinking, setThinking] = useState<{ visible: boolean; text: string | null; sessionId: string | null }>({
+    visible: false,
+    text: null,
+    sessionId: null,
+  });
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   async function loadMessages(sessionId: string) {
@@ -43,8 +73,16 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
       setError(null);
       const log = await getMessages(patientId, sessionId);
       setMessages((current) => {
-        const localFailed = current.filter((m) => m.id.startsWith("local-") && m.localStatus === "failed");
-        return [...log.messages, ...localFailed];
+        // Keep ALL in-flight local messages across all sessions so that
+        // navigating away and back never drops a pending/failed message.
+        // Render-time filtering (below) ensures they only show in their
+        // own session's view.
+        const allLocal = current.filter(
+          (m) =>
+            m.id.startsWith("local-") &&
+            (m.localStatus === "failed" || m.localStatus === "pending")
+        );
+        return [...log.messages, ...allLocal];
       });
     } catch (err) {
       console.error("[ui] failed to load chat messages", {
@@ -133,11 +171,13 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
       <div className="flex-1 overflow-y-auto py-5">
         {loadingMessages ? <div className="empty-state">Loading messages...</div> : null}
         {error ? <div className="status-error mb-4">{error}</div> : null}
-        {!loadingMessages && messages.length === 0 ? <div className="empty-state">No messages yet. Start with a plain-English question.</div> : null}
+        {!loadingMessages && messages.filter((m) => !m.id.startsWith("local-") || m.localSessionId === session?.id).length === 0 ? <div className="empty-state">No messages yet. Start with a plain-English question.</div> : null}
         <div className="space-y-5">
-          {messages.map((message, index) => {
+          {messages.filter((m) => !m.id.startsWith("local-") || m.localSessionId === session?.id).map((message, index) => {
             const isAssistant = message.role === "assistant";
-            const showRefined = Boolean(isAssistant && refinedResponseContent && message.content === refinedResponseContent && index === messages.length - 1);
+            const showRefined = Boolean(
+              isAssistant && refinedResponseContent && message.content === refinedResponseContent && index === messages.length - 1
+            );
             const assistantHtml = isAssistant
               ? DOMPurify.sanitize(marked.parse(message.content) as string)
               : "";
@@ -167,6 +207,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
               </article>
             );
           })}
+          {thinking.visible && thinking.sessionId === (session?.id ?? null) ? <ThinkingBubble text={thinking.text} /> : null}
           <div ref={bottomRef} />
         </div>
       </div>
@@ -186,13 +227,10 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             setLoading(true);
             setError(null);
             setDraft("");
-            let targetSessionId = session?.id ?? null;
-            if (!targetSessionId && onCreateSession) {
-              targetSessionId = await onCreateSession();
-            }
-            if (!targetSessionId) {
-              throw new Error("Could not start chat session");
-            }
+            // Persist the user message immediately — before any async work —
+            // so it survives session creation, effect-triggered reloads, etc.
+            // We may not have a session ID yet (new chat), so we'll update
+            // localSessionId once we get one.
             setMessages((current) => [
               ...current,
               {
@@ -202,9 +240,31 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                 citations: [],
                 timestamp: new Date().toISOString(),
                 localStatus: "pending",
+                localSessionId: session?.id ?? "__pending__",
               },
             ]);
+            let targetSessionId = session?.id ?? null;
+            if (!targetSessionId && onCreateSession) {
+              targetSessionId = await onCreateSession();
+            }
+            if (!targetSessionId) {
+              throw new Error("Could not start chat session");
+            }
+            // Stamp the local message with the now-resolved session ID.
+            setMessages((current) =>
+              current.map((m) =>
+                m.id === localUserId ? { ...m, localSessionId: targetSessionId! } : m
+              )
+            );
+            setThinking({ visible: true, text: null, sessionId: targetSessionId });
             const response = await sendChat(patientId, targetSessionId, message);
+            // Surface any thinking/reasoning text emitted by the model.
+            const thinkingContent = response.thinking ?? null;
+            if (thinkingContent) {
+              setThinking({ visible: true, text: thinkingContent, sessionId: targetSessionId });
+              await new Promise((r) => setTimeout(r, 800));
+            }
+            setThinking({ visible: false, text: null });
             setRefinedResponseContent(response.grounding_retried ? response.response : null);
             setMessages((current) => current.filter((m) => m.id !== localUserId));
             await loadMessages(targetSessionId);
@@ -219,6 +279,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
               error: err instanceof Error ? err.message : err,
             });
              console.error("[ui] raw error:", err);
+            setThinking({ visible: false, text: null, sessionId: null });
             setMessages((current) =>
               current.map((m) =>
                 m.id === localUserId
