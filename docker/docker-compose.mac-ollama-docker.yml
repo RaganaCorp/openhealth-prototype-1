@@ -1,0 +1,55 @@
+# OpenHealth — macOS, Ollama running in Docker container
+# Copied to project root as docker-compose.yml by install.sh
+
+name: openhealth
+
+networks:
+  openhealth_net:
+    driver: bridge
+
+volumes:
+  ollama_data:
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - BACKEND_API_URL=http://backend:8000
+    networks:
+      - openhealth_net
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_PATH=/data
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - ./data:/data
+    networks:
+      - openhealth_net
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - openhealth_net
+    restart: unless-stopped

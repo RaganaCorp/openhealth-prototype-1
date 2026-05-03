@@ -1,0 +1,39 @@
+# OpenHealth — Windows, Ollama running on host machine
+# Copied to project root as docker-compose.yml by install.ps1
+
+name: openhealth
+
+networks:
+  openhealth_net:
+    driver: bridge
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - BACKEND_API_URL=http://backend:8000
+    networks:
+      - openhealth_net
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_PATH=/data
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - ./data:/data
+    networks:
+      - openhealth_net
+    restart: unless-stopped
