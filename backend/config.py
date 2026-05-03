@@ -33,7 +33,10 @@ def _load_default_values() -> dict[str, Any]:
 
 
 class Config(BaseModel):
-    model: str
+    chat_model: str
+    clinical_model: str
+    summary_model: str
+    verification_model: str
     embedding_model: str
     embed_timeout_seconds: float
     chat_timeout_seconds: float
@@ -44,6 +47,8 @@ class Config(BaseModel):
     context_window_tokens: int
     data_path: str = str(DATA_PATH)
     ollama_base_url: str
+    routing_mode: str
+    medgemma_verification_enabled: bool
     grounding_enabled: bool
     grounding_max_retries: int
 

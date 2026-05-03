@@ -110,11 +110,14 @@ async def ensure_ollama_available() -> None:
             if isinstance(name, str):
                 installed.update(_model_variants(name))
 
-    missing: list[str] = []
-    if cfg.model not in installed:
-        missing.append(cfg.model)
-    if cfg.embedding_model not in installed:
-        missing.append(cfg.embedding_model)
+    required_models = {
+        cfg.chat_model,
+        cfg.clinical_model,
+        cfg.summary_model,
+        cfg.verification_model,
+        cfg.embedding_model,
+    }
+    missing: list[str] = [name for name in sorted(required_models) if name not in installed]
 
     if missing:
         missing_cmds = "\n".join(f"ollama pull {m}" for m in missing)
@@ -168,7 +171,7 @@ async def chat_complete(
     model: str | None = None,
 ) -> str:
     cfg = load_config()
-    effective_model = model or cfg.model
+    effective_model = model or cfg.chat_model
     endpoint = "/api/chat"
     request_payload = {"model": effective_model, "messages": messages, "stream": False}
     _logger.info(

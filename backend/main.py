@@ -61,6 +61,42 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_HIGH_RISK_QUERY_TERMS = (
+    "dose",
+    "dosage",
+    "contraindication",
+    "interaction",
+    "allergy",
+    "adverse",
+    "side effect",
+    "lab",
+    "abnormal",
+    "critical",
+    "risk",
+    "emergency",
+    "chest pain",
+    "stroke",
+    "suicidal",
+)
+
+
+def _is_high_risk_query(user_message: str) -> bool:
+    lowered = user_message.lower()
+    return any(term in lowered for term in _HIGH_RISK_QUERY_TERMS)
+
+
+def _should_run_clinical_verification(
+    routing_mode: str,
+    high_risk_query: bool,
+) -> bool:
+    mode = routing_mode.lower().strip()
+    if mode == "strict":
+        return True
+    if mode == "fast":
+        return False
+    return high_risk_query
+
+
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     _logger.exception(
@@ -119,7 +155,10 @@ class ChatRequest(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
-    model: Optional[str] = None
+    chat_model: Optional[str] = None
+    clinical_model: Optional[str] = None
+    summary_model: Optional[str] = None
+    verification_model: Optional[str] = None
     embedding_model: Optional[str] = None
     embed_timeout_seconds: Optional[float] = None
     chat_timeout_seconds: Optional[float] = None
@@ -130,6 +169,8 @@ class ConfigUpdateRequest(BaseModel):
     context_window_tokens: Optional[int] = None
     data_path: Optional[str] = None
     ollama_base_url: Optional[str] = None
+    routing_mode: Optional[str] = None
+    medgemma_verification_enabled: Optional[bool] = None
     grounding_enabled: Optional[bool] = None
     grounding_max_retries: Optional[int] = None
 
@@ -399,7 +440,8 @@ async def regenerate_summary(patient_id: str):
 
     record = await pt.load_patient_record(patient_id)
     overrides = None if record is None else record.get("summary_overrides")
-    summary = await tl.generate_summary(patient_md, overrides)
+    cfg = load_config()
+    summary = await tl.generate_summary(patient_md, overrides, model=cfg.summary_model)
 
     if record:
         record["summary"] = summary
@@ -607,8 +649,9 @@ async def chat(body: ChatRequest):
         use_chunks = token_estimate > effective_ctx_tokens
 
         if use_chunks:
+            chunk_results = max(6, min(20, effective_ctx_tokens // 3000))
             doc_chunks = await memory.query_docs(
-                patient_id, query_embedding, n_results=20, document_type=doc_type
+                patient_id, query_embedding, n_results=chunk_results, document_type=doc_type
             )
             patient_context = "\n\n".join(c["text"] for c in doc_chunks)
         else:
@@ -647,8 +690,11 @@ async def chat(body: ChatRequest):
             {"role": "user", "content": "\n\n---\n\n".join(user_content_parts)},
         ]
 
+        high_risk_query = _is_high_risk_query(user_message)
+        draft_model = cfg.clinical_model if cfg.routing_mode.lower().strip() == "strict" else cfg.chat_model
+
         # 6. Generate response.
-        draft = await ai.chat_complete(messages)
+        draft = await ai.chat_complete(messages, model=draft_model)
 
         # 7. Grounding verification.
         grounding_retried = False
@@ -656,10 +702,21 @@ async def chat(body: ChatRequest):
         final_answer = draft
         citations: list[dict] = []
 
-        if cfg.grounding_enabled:
+        if cfg.grounding_enabled and cfg.medgemma_verification_enabled:
+            should_verify = _should_run_clinical_verification(cfg.routing_mode, high_risk_query)
+        else:
+            should_verify = False
+
+        if should_verify:
             context_for_grounding = patient_context
+            grounding_context_limit = max(8000, min(30000, effective_ctx_tokens // 2))
             for attempt in range(cfg.grounding_max_retries + 1):
-                result = await tl.verify_grounding(final_answer, context_for_grounding)
+                result = await tl.verify_grounding(
+                    final_answer,
+                    context_for_grounding,
+                    context_limit=grounding_context_limit,
+                    model=cfg.verification_model,
+                )
                 citations = result.get("citations", [])
                 if attempt > 0:
                     grounding_retried = True
@@ -739,7 +796,11 @@ async def chat(body: ChatRequest):
         )
         if session_record and session_record.get("title_auto_generated") and session_record.get("title") == "New Chat":
             try:
-                auto_title = await tl.generate_session_title(user_message, final_answer)
+                auto_title = await tl.generate_session_title(
+                    user_message,
+                    final_answer,
+                    model=cfg.chat_model,
+                )
                 _logger.info("auto-title generated session_id=%s title=%r", session_id, auto_title)
                 if auto_title:
                     session_updates["title"] = auto_title

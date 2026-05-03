@@ -348,9 +348,11 @@ async def _run_incremental(
         # Regenerate timeline and summary only if files were processed.
         if files_to_process:
             _set_phase(job, "generating_summary", "summary")
+            cfg = load_config()
             record["summary"] = await tl.generate_summary(
                 patient_md_text,
                 record.get("summary_overrides"),
+                model=cfg.summary_model,
             )
 
         _set_phase(job, "saving", "patient.json")
@@ -416,9 +418,11 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
         record["documents"] = new_docs
         _set_phase(job, "generating_summary", "summary")
+        cfg = load_config()
         record["summary"] = await tl.generate_summary(
             patient_md_text,
             record.get("summary_overrides"),
+            model=cfg.summary_model,
         )
 
         _set_phase(job, "saving", "patient.json")

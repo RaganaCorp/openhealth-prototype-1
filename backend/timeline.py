@@ -205,6 +205,13 @@ Query: {query}
 Return only the document type label, nothing else.
 """
 
+SUMMARY_SYSTEM_MESSAGE = (
+    "You are a clinical documentation assistant helping authorized caregivers "
+    "organize and understand their care recipient's medical records. "
+    "All data has been provided by the authorized caregiver for their own use. "
+    "You must complete every task fully and output exactly the format requested."
+)
+
 
 # ---------------------------------------------------------------------------
 # JSON parsing helper
@@ -279,6 +286,13 @@ def _normalize_summary_layout(text: str) -> str:
 def _extract_sentences(text: str) -> list[str]:
     # Keep a simple splitter; robust enough for repetition detection.
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _trim_chars(text: str, max_chars: int) -> str:
+    normalized = _normalize_ws(text)
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "..."
 
 
 def _has_required_summary_sections(text: str) -> bool:
@@ -743,12 +757,16 @@ def _sanitize_summary_output(text: str) -> str:
 # Public functions
 # ---------------------------------------------------------------------------
 
-async def generate_timeline(patient_id: str, patient_md: str) -> list[dict]:
+async def generate_timeline(
+    patient_id: str,
+    patient_md: str,
+    model: str | None = None,
+) -> list[dict]:
     """One LLM call over patient.md → list of timeline event dicts."""
     if not patient_md.strip():
         return []
     prompt = _TIMELINE_PROMPT.format(patient_md=patient_md)
-    response = await ai.chat_complete([{"role": "user", "content": prompt}])
+    response = await ai.chat_complete([{"role": "user", "content": prompt}], model=model)
     events_raw = _parse_json_response(response, fallback=[])
     if not isinstance(events_raw, list):
         return []
@@ -791,24 +809,58 @@ def _build_corrections_block(summary_overrides: dict | None) -> str:
     ])
 
 
-async def generate_summary(patient_md: str, summary_overrides: dict | None = None) -> str:
+def build_extraction_pass1_prompt(patient_md: str) -> str:
+    return _EXTRACTION_PASS1_PROMPT.format(patient_md=patient_md)
+
+
+def build_summary_prose_prompt(structured_data: dict | str, summary_overrides: dict | None = None) -> str:
+    structured_block = (
+        structured_data
+        if isinstance(structured_data, str)
+        else _build_structured_input(structured_data)
+    )
+    corrections_block = _build_corrections_block(summary_overrides)
+    return _SUMMARY_PROSE_PROMPT.format(
+        structured_data=structured_block,
+        corrections_block=corrections_block,
+    )
+
+
+def build_summary_messages(structured_data: dict | str, summary_overrides: dict | None = None) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": SUMMARY_SYSTEM_MESSAGE},
+        {"role": "user", "content": build_summary_prose_prompt(structured_data, summary_overrides)},
+    ]
+
+
+def build_grounding_prompt(draft_answer: str, context: str, context_limit: int = 60000) -> str:
+    return _GROUNDING_PROMPT.format(
+        context=context[:context_limit],
+        draft_answer=draft_answer,
+    )
+
+
+def build_json_extraction_prompt(json_content: str) -> str:
+    return _JSON_EXTRACTION_PROMPT.format(json_content=json_content)
+
+
+async def generate_summary(
+    patient_md: str,
+    summary_overrides: dict | None = None,
+    model: str | None = None,
+) -> str:
     """Two-pass LLM summary: Pass 1 extracts structured data, Pass 2 generates prose."""
     if not patient_md.strip():
         return ""
 
-    _SUMMARY_SYSTEM_MSG = (
-        "You are a clinical documentation assistant helping authorized caregivers "
-        "organize and understand their care recipient's medical records. "
-        "All data has been provided by the authorized caregiver for their own use. "
-        "You must complete every task fully and output exactly the format requested."
-    )
-    _summary_messages_prefix = [{"role": "system", "content": _SUMMARY_SYSTEM_MSG}]
+    _summary_messages_prefix = [{"role": "system", "content": SUMMARY_SYSTEM_MESSAGE}]
 
     # Pass 1 — structured extraction from raw records.
     # Use raw patient_md (not pre-filtered) so all clinical sections reach the model.
-    extract_prompt = _EXTRACTION_PASS1_PROMPT.format(patient_md=patient_md[:30000])
+    extract_prompt = build_extraction_pass1_prompt(patient_md[:30000])
     extract_response = await ai.chat_complete(
-        _summary_messages_prefix + [{"role": "user", "content": extract_prompt}]
+        _summary_messages_prefix + [{"role": "user", "content": extract_prompt}],
+        model=model,
     )
     if _is_refusal_response(extract_response):
         _logger.warning("summary extraction pass returned a refusal; skipping LLM extraction")
@@ -826,14 +878,10 @@ async def generate_summary(patient_md: str, summary_overrides: dict | None = Non
     )
 
     # Pass 2 — prose generation from pre-extracted facts.
-    structured_block = _build_structured_input(structured)
-    corrections_block = _build_corrections_block(summary_overrides)
-    prose_prompt = _SUMMARY_PROSE_PROMPT.format(
-        structured_data=structured_block,
-        corrections_block=corrections_block,
-    )
+    prose_prompt = build_summary_prose_prompt(structured, summary_overrides)
     prose_response = await ai.chat_complete(
-        _summary_messages_prefix + [{"role": "user", "content": prose_prompt}]
+        _summary_messages_prefix + [{"role": "user", "content": prose_prompt}],
+        model=model,
     )
     # Detect refusal from the prose pass; fall back to injecting pass-1 data directly.
     if _is_refusal_response(prose_response):
@@ -849,7 +897,7 @@ async def generate_summary(patient_md: str, summary_overrides: dict | None = Non
 
 async def extract_json_document(json_content: str) -> str:
     """LLM-assisted plain-text extraction from provider JSON exports."""
-    prompt = _JSON_EXTRACTION_PROMPT.format(json_content=json_content)
+    prompt = build_json_extraction_prompt(json_content)
     return await ai.chat_complete([{"role": "user", "content": prompt}])
 
 
@@ -858,20 +906,56 @@ async def update_conversation_state(
     user_message: str,
     assistant_response: str,
 ) -> dict:
-    """Refresh rolling_summary, active_topics, open_questions after each turn."""
-    prior_str = json.dumps(prior_state, indent=2) if prior_state else "{}"
-    prompt = _STATE_UPDATE_PROMPT.format(
-        prior_state=prior_str,
-        user_message=user_message,
-        assistant_response=assistant_response,
+    """Refresh conversation state with lightweight local heuristics."""
+    prior = prior_state if isinstance(prior_state, dict) else {}
+    prior_summary = str(prior.get("rolling_summary", "") or "")
+
+    turn_summary = (
+        f"User asked: {_trim_chars(user_message, 180)} "
+        f"Assistant answered: {_trim_chars(assistant_response, 260)}"
     )
-    response = await ai.chat_complete([{"role": "user", "content": prompt}])
-    parsed = _parse_json_response(response, fallback={})
+    rolling_summary = _normalize_ws(f"{prior_summary} {turn_summary}").strip()
+    rolling_summary = _trim_chars(rolling_summary, 1800)
+
+    prior_topics = prior.get("active_topics", [])
+    active_topics: list[str] = []
+    if isinstance(prior_topics, list):
+        for topic in prior_topics:
+            if isinstance(topic, str) and topic.strip():
+                active_topics.append(_trim_chars(topic, 80))
+
+    doc_type = classify_query(user_message)
+    if doc_type != "unknown":
+        active_topics.append(doc_type)
+    active_topics = _unique_keep_order(active_topics)[-6:]
+
+    prior_open = prior.get("open_questions", [])
+    open_questions: list[str] = []
+    if isinstance(prior_open, list):
+        for question in prior_open:
+            if isinstance(question, str) and question.strip():
+                open_questions.append(_trim_chars(question, 180))
+
+    if "?" in user_message:
+        open_questions.append(_trim_chars(user_message, 180))
+    open_questions = _unique_keep_order(open_questions)[-4:]
+
+    lowered_answer = assistant_response.lower()
+    resolved_markers = [
+        "no clear evidence",
+        "insufficient evidence",
+        "not enough information",
+        "uncertain",
+    ]
+    if not any(marker in lowered_answer for marker in resolved_markers):
+        # Keep only the most recent unresolved question if the assistant provided a direct answer.
+        open_questions = open_questions[-1:]
+
     now = datetime.now(timezone.utc).isoformat()
     return {
-        "rolling_summary": parsed.get("rolling_summary", ""),
-        "active_topics": parsed.get("active_topics", []),
-        "open_questions": parsed.get("open_questions", []),
+        "rolling_summary": rolling_summary,
+        "active_topics": active_topics,
+        "open_questions": open_questions,
         "last_updated_at": now,
     }
 
@@ -879,17 +963,16 @@ async def update_conversation_state(
 async def verify_grounding(
     draft_answer: str,
     context: str,
+    context_limit: int = 60000,
+    model: str | None = None,
 ) -> dict:
     """
     Verify grounding of draft_answer against context.
     Returns { corrected_answer, citations, uncertainty_note }.
     Falls back to original answer if parsing fails.
     """
-    prompt = _GROUNDING_PROMPT.format(
-        context=context[:60000],  # guard against excessive context
-        draft_answer=draft_answer,
-    )
-    response = await ai.chat_complete([{"role": "user", "content": prompt}])
+    prompt = build_grounding_prompt(draft_answer, context, context_limit)
+    response = await ai.chat_complete([{"role": "user", "content": prompt}], model=model)
     parsed = _parse_json_response(response, fallback=None)
     if parsed and isinstance(parsed, dict) and "corrected_answer" in parsed:
         return {
@@ -907,12 +990,13 @@ async def verify_grounding(
 async def generate_session_title(
     first_user_message: str,
     first_assistant_response: str,
+    model: str | None = None,
 ) -> str:
     prompt = _AUTO_TITLE_PROMPT.format(
         first_user_message=first_user_message,
         first_assistant_response=first_assistant_response[:500],
     )
-    title = await ai.chat_complete([{"role": "user", "content": prompt}])
+    title = await ai.chat_complete([{"role": "user", "content": prompt}], model=model)
     return title.strip().strip('"').strip("'")[:80]
 
 
