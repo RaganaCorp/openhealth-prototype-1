@@ -3,8 +3,35 @@
 A local-first medical record workspace with summary, and grounded chat.
 
 ## Table of Contents
+- [Machine Requirements](#machine-requirements)
 - [Getting Started](#getting-started)
 - [Developers](#developers)
+
+## Machine Requirements
+
+### Operating system
+- Windows 11 (or recent Windows 10) or macOS
+
+### RAM
+- Minimum: 16 GB RAM
+- Recommended: 32 GB RAM for smoother local model usage
+
+### Storage
+You need free disk space for Docker Desktop, Ollama, and model downloads.
+
+Approximate model sizes used by this project:
+- nomic-embed-text: ~275 MB
+- gemma4:e2b: ~7.2 GB
+- dcarrascosa/medgemma-1.5-4b-it:Q4_k_M: ~3.3 GB
+
+Model total: about 10.8 GB
+
+Also account for:
+- Docker Desktop install + runtime data: typically several GB and grows over time
+- Ollama install and cache: typically around 1+ GB plus model storage
+- Project data, logs, and future model updates
+
+Recommended free space before install: at least 30 GB (40+ GB preferred for headroom).
 
 ## Getting Started
 This path is designed for non-technical users.
