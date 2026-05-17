@@ -118,7 +118,24 @@ type RequestOptions = RequestInit & {
   isFormData?: boolean;
 };
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend";
+function resolveApiBaseUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL ?? process.env.NEXT_PUBLIC_API_URL;
+  if (configured && configured.trim()) {
+    return configured.replace(/\/+$/, "");
+  }
+
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      // In local Docker runs, bypass the Next.js proxy to avoid long-request proxy resets.
+      return `${window.location.protocol}//${host}:8000`;
+    }
+  }
+
+  return "/api/backend";
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
