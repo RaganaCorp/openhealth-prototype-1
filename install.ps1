@@ -20,36 +20,9 @@ if (-not (Test-Command "docker")) {
     Write-Host "Docker Desktop is not installed." -ForegroundColor Yellow
     Write-Host "Docker Desktop is required to run OpenHealth."
     Write-Host ""
-    $choice = Read-Host "Would you like to install Docker Desktop now? (Y/N)"
-    if ($choice -notmatch "^[Yy]") {
-        Write-Host ""
-        Write-Host "Please install Docker Desktop manually and re-run this installer:"
-        Write-Host "  https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-        exit 1
-    }
-
-    if (Test-Command "winget") {
-        Write-Host ""
-        Write-Host "Installing Docker Desktop via winget..." -ForegroundColor Cyan
-        Write-Host "(A UAC prompt will appear - please allow it to continue.)"
-        Write-Host ""
-        winget install Docker.DockerDesktop
-        Write-Host ""
-        Write-Host "Docker Desktop installed." -ForegroundColor Green
-        Write-Host ""
-        Write-Host "ACTION REQUIRED:" -ForegroundColor Yellow
-        Write-Host "  1. Launch Docker Desktop from the Start menu."
-        Write-Host "  2. Wait for it to fully start (whale icon in the taskbar stops animating)."
-        Write-Host "  3. If 'docker' is still not found, log out and back in to refresh your PATH."
-        Write-Host ""
-        Read-Host "Press Enter once Docker Desktop is running to continue"
-    } else {
-        Write-Host ""
-        Write-Host "winget is not available on this machine." -ForegroundColor Yellow
-        Write-Host "Please install Docker Desktop manually and re-run this installer:"
-        Write-Host "  https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-        exit 1
-    }
+    Write-Host "Please install Docker Desktop manually and re-run this installer:"
+    Write-Host "  https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+    exit 1
 }
 
 # -- 2. Check Docker daemon is running ----------------------------------------
