@@ -42,36 +42,17 @@ if ! command_exists docker; then
     echo "Docker Desktop is not installed."
     echo "Docker Desktop is required to run OpenHealth."
     echo ""
-    read -rp "Would you like to install Docker Desktop now? (Y/N): " choice
-    case "$choice" in
-        [Yy]*)
-            if command_exists brew; then
-                echo ""
-                echo "Installing Docker Desktop via Homebrew..."
-                brew install --cask docker
-                echo ""
-                echo "Docker Desktop installed."
-                echo ""
-                echo "ACTION REQUIRED:"
-                echo "  1. Open Docker Desktop from your Applications folder."
-                echo "  2. Wait for it to fully start (the whale icon in the menu bar stops animating)."
-                echo ""
-                read -rp "Press Enter once Docker Desktop is running to continue..."
-            else
-                echo ""
-                echo "Homebrew is not available on this machine."
-                echo "Please install Docker Desktop manually and re-run this installer:"
-                echo "  https://www.docker.com/products/docker-desktop/"
-                exit 1
-            fi
-            ;;
-        *)
-            echo ""
-            echo "Please install Docker Desktop manually and re-run this installer:"
-            echo "  https://www.docker.com/products/docker-desktop/"
-            exit 1
-            ;;
-    esac
+    echo "Please install Docker Desktop manually:"
+    echo "  https://www.docker.com/products/docker-desktop/"
+    echo ""
+    read -rp "Press Enter after installing Docker Desktop (or Ctrl+C to cancel)..."
+
+    if ! command_exists docker; then
+        echo ""
+        echo "Docker CLI is still not available in this terminal."
+        echo "Open a new terminal and re-run ./install.sh after Docker Desktop finishes installing."
+        exit 1
+    fi
 fi
 
 # ── 2. Check Docker daemon is running ─────────────────────────────────────────
