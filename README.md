@@ -44,19 +44,16 @@ Choose one:
 ### 2. Run the installer
 The installer checks Docker, helps with Ollama setup, copies the right Docker configuration, and pulls required AI models.
 
-Windows (File Explorer):
-1. Open the project folder in File Explorer.
-2. Right-click `install.ps1`.
-3. Click **Run with PowerShell**.
-
-If Windows blocks script execution, open PowerShell and run:
+Windows (PowerShell, copy/paste):
 ```powershell
+Set-Location "$HOME\Downloads\openhealth-prototype-1-main"
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
+Note: depending on how it is extracted, you might have another folder named `openhealth-prototype-1-main` within
 
-macOS (Terminal):
+macOS (Terminal, copy/paste):
 ```bash
-cd /path/to/prototype-adam-1
+cd "$HOME/Downloads/openhealth-prototype-1-main"
 chmod +x ./install.sh
 ./install.sh
 ```
