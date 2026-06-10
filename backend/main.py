@@ -107,7 +107,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     )
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{type(exc).__name__}: {exc}"},
+        content={"detail": _safe_error_detail(exc, "Internal server error")},
     )
 
 
@@ -117,6 +117,17 @@ def _http_404(detail: str) -> HTTPException:
 
 def _http_409(detail: str) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
+
+
+def _safe_error_detail(exc: Exception, fallback: str) -> str:
+    """Client-safe error message. Our own operational failures (e.g. Ollama
+    unreachable, missing model) are raised as RuntimeError with curated,
+    non-sensitive text and are safe to surface. Any other exception may embed
+    file paths or record content, so return a generic message and rely on the
+    server logs (which capture the full detail) for diagnosis."""
+    if isinstance(exc, RuntimeError):
+        return str(exc)
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -853,7 +864,9 @@ async def chat(body: ChatRequest):
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Chat pipeline failed: {type(exc).__name__}: {exc}",
+            detail=_safe_error_detail(
+                exc, "Chat failed due to an internal error. See server logs for details."
+            ),
         )
 
 
