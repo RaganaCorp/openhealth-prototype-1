@@ -27,6 +27,11 @@ from config import load_config
 _jobs: dict[str, dict] = {}
 # patient_id -> job_id for currently running jobs
 _patient_active: dict[str, str] = {}
+# patient_id -> "incremental" | "rebuild": a follow-up run requested while a job
+# was already in flight. Coalesces bursts (e.g. several files dropped into
+# uploads/ at once, each firing the watcher) into a single follow-up run so two
+# ingestion jobs never mutate the same patient.json concurrently.
+_patient_pending: dict[str, str] = {}
 
 
 def _now() -> str:
@@ -257,18 +262,54 @@ def _rebuild_patient_md(patient_folder: Path, doc_records: list[dict]) -> None:
 # Public ingestion entry points
 # ---------------------------------------------------------------------------
 
+def _request_followup(patient_id: str, kind: str) -> None:
+    """Record that another run is needed once the in-flight job finishes.
+    A rebuild supersedes a queued incremental refresh."""
+    if _patient_pending.get(patient_id) == "rebuild":
+        return
+    _patient_pending[patient_id] = kind
+
+
+def _schedule_followup_if_pending(patient_id: str) -> None:
+    """Kick off a single coalesced follow-up run, if one was requested while busy.
+    Called once an ingestion job finishes (after _patient_active is cleared)."""
+    kind = _patient_pending.pop(patient_id, None)
+    if kind is None:
+        return
+    job = _create_job(patient_id)
+    if kind == "rebuild":
+        asyncio.create_task(_run_rebuild(patient_id, job))
+    else:
+        # A plain incremental rescans all uploads, so any files that arrived
+        # while the previous job ran are picked up — no need to track filenames.
+        asyncio.create_task(_run_incremental(patient_id, job, None))
+
+
 async def start_incremental_ingestion(
     patient_id: str,
     target_filenames: Optional[list[str]] = None,
 ) -> dict:
-    """Create job, fire background task, return job immediately."""
+    """Create job, fire background task, return job immediately.
+    If a job is already running for this patient, coalesce into a single
+    follow-up run instead of starting a competing job that would race on
+    patient.json."""
+    active = get_active_job(patient_id)
+    if active is not None:
+        _request_followup(patient_id, "incremental")
+        return active
     job = _create_job(patient_id)
     asyncio.create_task(_run_incremental(patient_id, job, target_filenames))
     return job
 
 
 async def start_full_rebuild(patient_id: str) -> dict:
-    """Create job, fire background task, return job immediately."""
+    """Create job, fire background task, return job immediately.
+    If a job is already running for this patient, queue the rebuild to run after
+    it finishes rather than mutating patient.json concurrently."""
+    active = get_active_job(patient_id)
+    if active is not None:
+        _request_followup(patient_id, "rebuild")
+        return active
     job = _create_job(patient_id)
     asyncio.create_task(_run_rebuild(patient_id, job))
     return job
@@ -363,7 +404,8 @@ async def _run_incremental(
 
     except Exception as e:
         _fail_job(job, str(e))
-        return
+    finally:
+        _schedule_followup_if_pending(patient_id)
 
 
 async def _run_rebuild(patient_id: str, job: dict) -> None:
@@ -433,4 +475,5 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
     except Exception as e:
         _fail_job(job, str(e))
-        return
+    finally:
+        _schedule_followup_if_pending(patient_id)
