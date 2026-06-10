@@ -380,24 +380,31 @@ async def _run_incremental(
             record.get("summary_overrides"),
         )
 
-        # Update patient.json.
-        record["documents"] = all_doc_records
+        # Update patient.json. Compute owned fields first, then persist only
+        # those via mutate_patient_record so a concurrent chat write (e.g.
+        # conversation_states) on the same record is not clobbered.
         patient_md_text = await asyncio.to_thread(
             docs_module.read_patient_md, patient_folder
         )
 
-        # Regenerate timeline and summary only if files were processed.
+        new_summary: Optional[str] = None
+        # Regenerate the summary only if files were processed.
         if files_to_process:
             _set_phase(job, "generating_summary", "summary")
             cfg = load_config()
-            record["summary"] = await tl.generate_summary(
+            new_summary = await tl.generate_summary(
                 patient_md_text,
                 record.get("summary_overrides"),
                 model=cfg.summary_model,
             )
 
+        def _apply(r: dict) -> None:
+            r["documents"] = all_doc_records
+            if new_summary is not None:
+                r["summary"] = new_summary
+
         _set_phase(job, "saving", "patient.json")
-        await pt.save_patient_record(record)
+        await pt.mutate_patient_record(patient_id, _apply)
         await pt.update_ingestion_stats(patient_id, len(all_doc_records))
 
         _complete_job(job)
@@ -458,17 +465,20 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
             docs_module.read_patient_md, patient_folder
         )
 
-        record["documents"] = new_docs
         _set_phase(job, "generating_summary", "summary")
         cfg = load_config()
-        record["summary"] = await tl.generate_summary(
+        new_summary = await tl.generate_summary(
             patient_md_text,
             record.get("summary_overrides"),
             model=cfg.summary_model,
         )
 
+        def _apply(r: dict) -> None:
+            r["documents"] = new_docs
+            r["summary"] = new_summary
+
         _set_phase(job, "saving", "patient.json")
-        await pt.save_patient_record(record)
+        await pt.mutate_patient_record(patient_id, _apply)
         await pt.update_ingestion_stats(patient_id, len(new_docs))
 
         _complete_job(job)

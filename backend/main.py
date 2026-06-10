@@ -422,8 +422,9 @@ async def update_summary_overrides(patient_id: str, body: SummaryOverridesReques
         raise _http_404("Patient not found")
 
     overrides = _normalize_summary_overrides(body.model_dump())
-    record["summary_overrides"] = overrides
-    await pt.save_patient_record(record)
+    await pt.mutate_patient_record(
+        patient_id, lambda r: r.__setitem__("summary_overrides", overrides)
+    )
 
     patient_folder = Path(entry["folder_path"])
     await asyncio.to_thread(docs_module.upsert_summary_overrides_section, patient_folder, overrides)
@@ -443,9 +444,7 @@ async def regenerate_summary(patient_id: str):
     cfg = load_config()
     summary = await tl.generate_summary(patient_md, overrides, model=cfg.summary_model)
 
-    if record:
-        record["summary"] = summary
-        await pt.save_patient_record(record)
+    await pt.mutate_patient_record(patient_id, lambda r: r.__setitem__("summary", summary))
 
     return {"summary": summary}
 
