@@ -703,8 +703,10 @@ async def chat(body: ChatRequest):
         high_risk_query = _is_high_risk_query(user_message)
         draft_model = cfg.clinical_model if cfg.routing_mode.lower().strip() == "strict" else cfg.chat_model
 
-        # 6. Generate response.
-        draft = await ai.chat_complete(messages, model=draft_model, num_ctx=effective_ctx_tokens)
+        # 6. Generate response (capturing any model reasoning separately).
+        draft, draft_thinking = await ai.chat_complete_with_thinking(
+            messages, model=draft_model, num_ctx=effective_ctx_tokens
+        )
 
         # 7. Grounding verification.
         grounding_retried = False
@@ -751,6 +753,7 @@ async def chat(body: ChatRequest):
             "role": "assistant",
             "content": final_answer,
             "citations": citations,
+            "thinking": draft_thinking,
             "timestamp": now,
         }
         await pt.append_message(patient_id, session_id, user_msg_record)
@@ -833,6 +836,7 @@ async def chat(body: ChatRequest):
             "grounding_retried": grounding_retried,
             "retry_count": retry_count,
             "citations": citations,
+            "thinking": draft_thinking,
         }
     except HTTPException:
         raise

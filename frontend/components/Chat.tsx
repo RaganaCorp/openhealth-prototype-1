@@ -27,25 +27,15 @@ type LocalChatMessage = ChatMessage & {
   localSessionId?: string;
 };
 
-function ThinkingBubble({ text }: { text: string | null }) {
+function ThinkingBubble() {
+  // In-flight indicator only. The model's reasoning is persisted on the
+  // assistant message and rendered as a disclosure beneath it once it arrives.
   return (
     <article className="message-row justify-start">
       <div className="message-bubble message-bubble-assistant">
-        {text === null ? (
-          <div className="thinking-dots" aria-label="Thinking">
-            <span /><span /><span />
-          </div>
-        ) : (
-          <>
-            <div className="thinking-dots" aria-label="Thinking">
-              <span /><span /><span />
-            </div>
-            <details className="thinking-disclosure">
-              <summary>Thinking…</summary>
-              <div className="thinking-disclosure-body">{text}</div>
-            </details>
-          </>
-        )}
+        <div className="thinking-dots" aria-label="Thinking">
+          <span /><span /><span />
+        </div>
       </div>
     </article>
   );
@@ -60,9 +50,8 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [refinedResponseContent, setRefinedResponseContent] = useState<string | null>(null);
-  const [thinking, setThinking] = useState<{ visible: boolean; text: string | null; sessionId: string | null }>({
+  const [thinking, setThinking] = useState<{ visible: boolean; sessionId: string | null }>({
     visible: false,
-    text: null,
     sessionId: null,
   });
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -189,6 +178,12 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                   ) : (
                     <p className="whitespace-pre-wrap text-sm leading-7">{message.content}</p>
                   )}
+                  {isAssistant && message.thinking ? (
+                    <details className="thinking-disclosure mt-3">
+                      <summary>Thinking…</summary>
+                      <div className="thinking-disclosure-body">{message.thinking}</div>
+                    </details>
+                  ) : null}
                   {!isAssistant && message.localStatus === "failed" ? (
                     <div className="mt-3 text-xs text-error">Failed to send. Please retry.</div>
                   ) : null}
@@ -204,7 +199,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
               </article>
             );
           })}
-          {thinking.visible && thinking.sessionId === (session?.id ?? null) ? <ThinkingBubble text={thinking.text} /> : null}
+          {thinking.visible && thinking.sessionId === (session?.id ?? null) ? <ThinkingBubble /> : null}
           <div ref={bottomRef} />
         </div>
       </div>
@@ -253,15 +248,9 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                 m.id === localUserId ? { ...m, localSessionId: targetSessionId! } : m
               )
             );
-            setThinking({ visible: true, text: null, sessionId: targetSessionId });
+            setThinking({ visible: true, sessionId: targetSessionId });
             const response = await sendChat(patientId, targetSessionId, message);
-            // Surface any thinking/reasoning text emitted by the model.
-            const thinkingContent = response.thinking ?? null;
-            if (thinkingContent) {
-              setThinking({ visible: true, text: thinkingContent, sessionId: targetSessionId });
-              await new Promise((r) => setTimeout(r, 800));
-            }
-            setThinking({ visible: false, text: null, sessionId: null });
+            setThinking({ visible: false, sessionId: null });
             setRefinedResponseContent(response.grounding_retried ? response.response : null);
             setMessages((current) => current.filter((m) => m.id !== localUserId));
             await loadMessages(targetSessionId);
@@ -276,7 +265,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
               error: err instanceof Error ? err.message : err,
             });
              console.error("[ui] raw error:", err);
-            setThinking({ visible: false, text: null, sessionId: null });
+            setThinking({ visible: false, sessionId: null });
             setMessages((current) =>
               current.map((m) =>
                 m.id === localUserId

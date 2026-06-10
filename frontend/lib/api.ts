@@ -34,6 +34,7 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   citations: Citation[];
+  thinking?: string | null;
   timestamp: string;
 };
 

@@ -5,6 +5,7 @@ All calls use httpx.AsyncClient with appropriate timeouts.
 
 import logging
 import json
+import re
 from time import perf_counter
 from typing import Any
 
@@ -70,6 +71,31 @@ def _extract_chat_token_usage(
 def _model_variants(name: str) -> set[str]:
     base = name.split(":", 1)[0]
     return {name, base}
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+
+
+def _split_thinking(content: str, native_thinking: str | None) -> tuple[str, str | None]:
+    """Separate model reasoning from the answer body.
+
+    Captures Ollama's native ``message.thinking`` field (returned by
+    thinking-capable models) and any inline ``<think>...</think>`` blocks, and
+    returns ``(clean_answer, thinking_text_or_None)`` with the reasoning removed
+    from the answer.
+    """
+    parts: list[str] = []
+    if native_thinking and native_thinking.strip():
+        parts.append(native_thinking.strip())
+    for block in _THINK_BLOCK_RE.findall(content):
+        if block.strip():
+            parts.append(block.strip())
+
+    answer = _THINK_BLOCK_RE.sub("", content)
+    # Drop gemma-style reasoning sentinel tokens that occasionally leak.
+    answer = re.sub(r"<unused\d+>", "", answer).strip()
+    thinking = "\n\n".join(parts).strip() or None
+    return answer, thinking
 
 
 def _extract_ollama_error(exc: httpx.HTTPStatusError) -> str:
@@ -166,17 +192,26 @@ async def embed(text: str) -> list[float]:
         return resp.json()["embedding"]
 
 
-async def chat_complete(
+async def _chat_request(
     messages: list[dict[str, str]],
-    model: str | None = None,
-    num_ctx: int | None = None,
-) -> str:
+    model: str | None,
+    num_ctx: int | None,
+    think: bool,
+) -> dict[str, Any]:
+    """POST to Ollama /api/chat and return the raw response payload.
+
+    When ``think`` is set we ask Ollama for separate reasoning output; models or
+    Ollama builds that don't support the flag reject it, so we transparently
+    retry once without it rather than failing the chat.
+    """
     cfg = load_config()
     effective_model = model or cfg.chat_model
     endpoint = "/api/chat"
     request_payload: dict[str, Any] = {"model": effective_model, "messages": messages, "stream": False}
     if num_ctx and num_ctx > 0:
         request_payload["options"] = {"num_ctx": num_ctx}
+    if think:
+        request_payload["think"] = True
     _logger.info(
         "ollama chat request endpoint=%s model=%s payload=%s",
         endpoint,
@@ -184,57 +219,85 @@ async def chat_complete(
         _truncate_for_log(request_payload),
     )
     async with httpx.AsyncClient() as client:
-        try:
-            started_at = _log_ollama_call_start(endpoint, effective_model)
-            resp = await client.post(
-                f"{cfg.ollama_base_url}/api/chat",
-                json=request_payload,
-                timeout=cfg.chat_timeout_seconds,
+        while True:
+            try:
+                started_at = _log_ollama_call_start(endpoint, effective_model)
+                resp = await client.post(
+                    f"{cfg.ollama_base_url}/api/chat",
+                    json=request_payload,
+                    timeout=cfg.chat_timeout_seconds,
+                )
+                resp.raise_for_status()
+                _log_ollama_call_end(started_at, endpoint, resp.status_code)
+            except httpx.HTTPStatusError as exc:
+                detail = _extract_ollama_error(exc)
+                # If the model can't do separate thinking, drop the flag and retry.
+                if request_payload.pop("think", None) and "think" in detail.lower():
+                    _logger.info(
+                        "ollama chat: model does not support think flag, retrying without it model=%s",
+                        effective_model,
+                    )
+                    continue
+                _logger.error(
+                    "ollama chat http error endpoint=%s model=%s detail=%s payload=%s",
+                    endpoint,
+                    effective_model,
+                    detail,
+                    _truncate_for_log(request_payload),
+                )
+                raise RuntimeError(
+                    f"Ollama chat request failed for model '{effective_model}': {detail}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                _logger.exception(
+                    "ollama chat transport error endpoint=%s model=%s payload=%s",
+                    endpoint,
+                    effective_model,
+                    _truncate_for_log(request_payload),
+                )
+                raise RuntimeError(
+                    f"Ollama chat transport failure for model '{effective_model}': {exc}"
+                ) from exc
+
+            response_payload = resp.json()
+            content = response_payload.get("message", {}).get("content", "")
+            prompt_tokens, completion_tokens, total_tokens, estimated = _extract_chat_token_usage(
+                response_payload,
+                messages,
+                content,
             )
-            resp.raise_for_status()
-            _log_ollama_call_end(started_at, endpoint, resp.status_code)
-        except httpx.HTTPStatusError as exc:
-            detail = _extract_ollama_error(exc)
-            _logger.error(
-                "ollama chat http error endpoint=%s model=%s detail=%s payload=%s",
+            _logger.info(
+                "ollama chat response endpoint=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d usage_estimated=%s payload=%s",
                 endpoint,
                 effective_model,
-                detail,
-                _truncate_for_log(request_payload),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                estimated,
+                _truncate_for_log(response_payload),
             )
-            raise RuntimeError(
-                f"Ollama chat request failed for model '{effective_model}': {detail}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            _logger.exception(
-                "ollama chat transport error endpoint=%s model=%s payload=%s",
-                endpoint,
-                effective_model,
-                _truncate_for_log(request_payload),
-            )
-            raise RuntimeError(
-                f"Ollama chat transport failure for model '{effective_model}': {exc}"
-            ) from exc
+            return response_payload
 
-        response_payload = resp.json()
-        content = response_payload.get("message", {}).get("content", "")
-        prompt_tokens, completion_tokens, total_tokens, estimated = _extract_chat_token_usage(
-            response_payload,
-            messages,
-            content,
-        )
 
-        _logger.info(
-            "ollama chat response endpoint=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d usage_estimated=%s payload=%s",
-            endpoint,
-            effective_model,
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            estimated,
-            _truncate_for_log(response_payload),
-        )
-        return content
+async def chat_complete(
+    messages: list[dict[str, str]],
+    model: str | None = None,
+    num_ctx: int | None = None,
+) -> str:
+    response_payload = await _chat_request(messages, model, num_ctx, think=False)
+    return response_payload.get("message", {}).get("content", "")
+
+
+async def chat_complete_with_thinking(
+    messages: list[dict[str, str]],
+    model: str | None = None,
+    num_ctx: int | None = None,
+) -> tuple[str, str | None]:
+    """Like chat_complete, but returns ``(answer, thinking)`` with the model's
+    reasoning separated out of the answer body."""
+    response_payload = await _chat_request(messages, model, num_ctx, think=True)
+    message = response_payload.get("message", {}) or {}
+    return _split_thinking(message.get("content", ""), message.get("thinking"))
 
 
 async def list_models() -> list[str]:
