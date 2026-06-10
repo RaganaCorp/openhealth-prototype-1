@@ -47,12 +47,17 @@ def _get_client() -> chromadb.PersistentClient:
     return _client
 
 
+def _patient_collection_prefix(patient_id: str) -> str:
+    """Common prefix shared by all of a patient's collections (docs + chats)."""
+    return f"p_{patient_id[:8]}"
+
+
 def _docs_collection_name(patient_id: str) -> str:
-    return f"p_{patient_id[:8]}_docs"
+    return f"{_patient_collection_prefix(patient_id)}_docs"
 
 
 def _chat_collection_name(patient_id: str, session_id: str) -> str:
-    return f"p_{patient_id[:8]}_c_{session_id[:8]}"
+    return f"{_patient_collection_prefix(patient_id)}_c_{session_id[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +289,7 @@ async def delete_chat_collection(patient_id: str, session_id: str) -> None:
 
 def _delete_all_patient_collections_sync(patient_id: str) -> None:
     client = _get_client()
-    prefix = f"patient_{patient_id}_"
+    prefix = _patient_collection_prefix(patient_id)
     try:
         collections = client.list_collections()
     except StopIteration:
