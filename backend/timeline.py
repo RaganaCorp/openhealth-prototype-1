@@ -7,7 +7,6 @@ JSON responses are parsed from code-fenced LLM output.
 import json
 import logging
 import re
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,29 +17,6 @@ _logger = logging.getLogger("uvicorn.error")
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
-
-_TIMELINE_PROMPT = """\
-You are a medical timeline extractor.
-Extract every medical event from the following records as a chronological list.
-For each event include: exact date, one-line title, document type, source filename.
-Do not infer or summarize — only extract what is explicitly stated.
-
-Return your answer as a JSON array with this exact structure:
-[
-    {{
-    "date": "YYYY-MM-DD or as stated",
-    "title": "one-line event title",
-    "summary": "one sentence summary",
-    "document_type": "lab result | discharge summary | imaging | prescription | clinical note | unknown",
-    "source_filename": "filename.pdf"
-    }}
-]
-
-Wrap the JSON in a ```json ... ``` code fence.
-
-RECORDS:
-{patient_md}
-"""
 
 _EXTRACTION_PASS1_PROMPT = """\
 You are a clinical data extractor. From the medical records below, extract structured lists of facts.
@@ -756,39 +732,6 @@ def _sanitize_summary_output(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
-
-async def generate_timeline(
-    patient_id: str,
-    patient_md: str,
-    model: str | None = None,
-) -> list[dict]:
-    """One LLM call over patient.md → list of timeline event dicts."""
-    if not patient_md.strip():
-        return []
-    prompt = _TIMELINE_PROMPT.format(patient_md=patient_md)
-    response = await ai.chat_complete([{"role": "user", "content": prompt}], model=model)
-    events_raw = _parse_json_response(response, fallback=[])
-    if not isinstance(events_raw, list):
-        return []
-
-    events: list[dict] = []
-    for ev in events_raw:
-        if not isinstance(ev, dict):
-            continue
-        events.append({
-            "id": str(uuid.uuid4()),
-            "patient_id": patient_id,
-            "document_id": None,
-            "date": ev.get("date", "unknown"),
-            "title": ev.get("title", ""),
-            "summary": ev.get("summary", ""),
-            "document_type": ev.get("document_type", "unknown"),
-            "source_filename": ev.get("source_filename", ""),
-        })
-    # Sort chronologically; put "unknown" dates at the end.
-    events.sort(key=lambda e: (e["date"] == "unknown", e["date"]))
-    return events
-
 
 def _build_corrections_block(summary_overrides: dict | None) -> str:
     if not summary_overrides:

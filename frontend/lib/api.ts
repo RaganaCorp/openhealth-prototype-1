@@ -75,17 +75,6 @@ export type PatientDocument = {
   size: number;
 };
 
-export type TimelineEvent = {
-  id: string;
-  patient_id: string;
-  document_id: string;
-  date: string;
-  title: string;
-  summary: string;
-  document_type: string;
-  source_filename: string;
-};
-
 export type SummaryOverrides = {
   active_conditions: string;
   current_medications: string;

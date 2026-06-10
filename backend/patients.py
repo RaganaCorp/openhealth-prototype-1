@@ -163,7 +163,6 @@ async def create_patient(name: str) -> dict:
         "last_ingested_at": None,
         "document_count": 0,
         "documents": [],
-        "timeline": [],
         "summary": "",
         "chat_sessions": [],
         "conversation_states": {},

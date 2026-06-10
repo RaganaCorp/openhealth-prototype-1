@@ -20,7 +20,7 @@ export function Header() {
               <span className="rounded-full bg-primary-light px-2.5 py-1 font-mono text-[11px] uppercase tracking-[0.24em] text-primary">v1</span>
             </div>
             <p className="mt-1 text-sm text-text-secondary">
-              {isPatientRoute ? "Grounded chat, summaries, and timeline in one workspace" : "Create patient workspaces and ingest records locally"}
+              {isPatientRoute ? "Grounded chat and summaries in one workspace" : "Create patient workspaces and ingest records locally"}
             </p>
           </div>
           <button aria-label="Open settings" className="icon-button" onClick={() => setOpen(true)} type="button">
