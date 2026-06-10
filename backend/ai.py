@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from config import load_config
+from config import LOG_PAYLOADS, load_config
 
 _logger = logging.getLogger("uvicorn.error")
 
@@ -42,6 +42,19 @@ def _truncate_for_log(value: Any, max_chars: int = 12000) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}... [truncated {len(text) - max_chars} chars]"
+
+
+def _loggable_payload(value: Any) -> str:
+    """Render a payload for logging, redacting PHI-bearing content unless payload
+    logging is explicitly enabled. Reports the size so logs stay useful for
+    debugging without exposing patient data."""
+    if LOG_PAYLOADS:
+        return _truncate_for_log(value)
+    try:
+        size = len(json.dumps(value, ensure_ascii=True))
+    except Exception:
+        size = -1
+    return f"<redacted {size} chars; set OPENHEALTH_LOG_PAYLOADS=1 to log payloads>"
 
 
 def _estimate_tokens_from_text(text: str) -> int:
@@ -174,7 +187,7 @@ async def embed(text: str) -> list[float]:
                 endpoint,
                 cfg.embedding_model,
                 detail,
-                _truncate_for_log({"model": cfg.embedding_model, "prompt": text}),
+                _loggable_payload({"model": cfg.embedding_model, "prompt": text}),
             )
             raise RuntimeError(
                 f"Ollama embeddings request failed for model '{cfg.embedding_model}': {detail}"
@@ -184,7 +197,7 @@ async def embed(text: str) -> list[float]:
                 "ollama embeddings transport error endpoint=%s model=%s payload=%s",
                 endpoint,
                 cfg.embedding_model,
-                _truncate_for_log({"model": cfg.embedding_model, "prompt": text}),
+                _loggable_payload({"model": cfg.embedding_model, "prompt": text}),
             )
             raise RuntimeError(
                 f"Ollama embeddings transport failure for model '{cfg.embedding_model}': {exc}"
@@ -216,7 +229,7 @@ async def _chat_request(
         "ollama chat request endpoint=%s model=%s payload=%s",
         endpoint,
         effective_model,
-        _truncate_for_log(request_payload),
+        _loggable_payload(request_payload),
     )
     async with httpx.AsyncClient() as client:
         while True:
@@ -243,7 +256,7 @@ async def _chat_request(
                     endpoint,
                     effective_model,
                     detail,
-                    _truncate_for_log(request_payload),
+                    _loggable_payload(request_payload),
                 )
                 raise RuntimeError(
                     f"Ollama chat request failed for model '{effective_model}': {detail}"
@@ -253,7 +266,7 @@ async def _chat_request(
                     "ollama chat transport error endpoint=%s model=%s payload=%s",
                     endpoint,
                     effective_model,
-                    _truncate_for_log(request_payload),
+                    _loggable_payload(request_payload),
                 )
                 raise RuntimeError(
                     f"Ollama chat transport failure for model '{effective_model}': {exc}"
@@ -274,7 +287,7 @@ async def _chat_request(
                 completion_tokens,
                 total_tokens,
                 estimated,
-                _truncate_for_log(response_payload),
+                _loggable_payload(response_payload),
             )
             return response_payload
 

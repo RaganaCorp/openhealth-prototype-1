@@ -18,7 +18,7 @@ from watchdog.observers import Observer
 
 import jobs
 import patients as pt
-from config import DATA_PATH
+from config import DATA_PATH, LOG_PAYLOADS
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,8 @@ class _UploadsHandler(PatternMatchingEventHandler):
         if Path(src_path).parent != self.uploads_dir:
             return  # subdirectory — ignore
 
-        logger.info("Watcher: new file detected for patient %s: %s", self.patient_id, src_path)
+        display_path = src_path if LOG_PAYLOADS else f"<redacted filename, {len(Path(src_path).name)} chars>"
+        logger.info("Watcher: new file detected for patient %s: %s", self.patient_id, display_path)
         asyncio.run_coroutine_threadsafe(
             jobs.start_incremental_ingestion(self.patient_id),
             _loop,

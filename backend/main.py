@@ -22,7 +22,7 @@ import memory
 import patients as pt
 import timeline as tl
 import watcher
-from config import load_config, patch_config, save_config, Config
+from config import LOG_PAYLOADS, load_config, patch_config, save_config, Config
 
 
 # ---------------------------------------------------------------------------
@@ -814,7 +814,11 @@ async def chat(body: ChatRequest):
                     final_answer,
                     model=cfg.chat_model,
                 )
-                _logger.info("auto-title generated session_id=%s title=%r", session_id, auto_title)
+                _logger.info(
+                    "auto-title generated session_id=%s title=%s",
+                    session_id,
+                    repr(auto_title) if LOG_PAYLOADS else f"<redacted {len(auto_title or '')} chars>",
+                )
                 if auto_title:
                     session_updates["title"] = auto_title
                     session_updates["title_auto_generated"] = False

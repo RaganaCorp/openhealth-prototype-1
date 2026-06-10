@@ -69,6 +69,13 @@ npm run dev:frontend
 - App config is stored under data/config/config.json
 - Patient files and vector data are persisted under ./data
 
+### Logging and PHI
+To protect patient health information, full LLM request/response payloads (which
+contain record content), chunk text, generated chat titles, and upload filenames
+are **redacted from the logs by default** — even at debug log level. To see them
+while debugging locally, set `OPENHEALTH_LOG_PAYLOADS=1` before starting the
+backend. Leave it unset in any shared or persisted-log environment.
+
 ## Common issues
 - Ollama not reachable: make sure Ollama is running on port 11434.
 - Python not found: ensure python/pip point to Python 3.12.

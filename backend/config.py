@@ -11,6 +11,12 @@ _DEFAULT_CONFIG_FILE = Path(__file__).with_name("config.defaults.json")
 DATA_PATH = Path(os.environ.get("DATA_PATH", "/data"))
 _CONFIG_FILE = DATA_PATH / "config" / "config.json"
 
+# Operational debug toggle. When enabled, full LLM request/response payloads
+# (which embed patient record content), chunk text, generated titles, and upload
+# filenames are written to the logs. OFF by default to keep protected health
+# information out of logs; set OPENHEALTH_LOG_PAYLOADS=1 for local debugging.
+LOG_PAYLOADS = os.environ.get("OPENHEALTH_LOG_PAYLOADS", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def _apply_env_overrides(values: dict[str, Any]) -> dict[str, Any]:
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL")
