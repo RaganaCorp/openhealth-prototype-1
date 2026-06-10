@@ -22,7 +22,7 @@ You need free disk space for Docker Desktop, Ollama, and model downloads.
 Approximate model sizes used by this project:
 - nomic-embed-text: ~275 MB
 - gemma4:e2b: ~7.2 GB
-- dcarrascosa/medgemma-1.5-4b-it:Q4_k_M: ~3.3 GB
+- dcarrascosa/medgemma-1.5-4b-it:Q4_K_M: ~3.3 GB
 
 Model total: about 10.8 GB
 

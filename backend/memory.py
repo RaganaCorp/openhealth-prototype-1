@@ -169,6 +169,31 @@ async def drop_docs_collection(patient_id: str) -> None:
     await asyncio.to_thread(_drop_docs_collection_sync, patient_id)
 
 
+def _delete_doc_chunks_sync(patient_id: str, document_id: str) -> None:
+    with _chroma_lock:
+        client = _get_client()
+        col_name = _docs_collection_name(patient_id)
+        try:
+            col = client.get_collection(col_name)
+        except Exception:
+            return
+        try:
+            col.delete(where={"document_id": {"$eq": document_id}})
+        except StopIteration:
+            _logger.warning("ChromaDB StopIteration during doc-chunk delete; skipping")
+        except Exception:
+            _logger.warning(
+                "ChromaDB error during doc-chunk delete patient_id=%s document_id=%s",
+                patient_id,
+                document_id,
+            )
+
+
+async def delete_doc_chunks(patient_id: str, document_id: str) -> None:
+    """Remove all chunks belonging to a single document from the docs collection."""
+    await asyncio.to_thread(_delete_doc_chunks_sync, patient_id, document_id)
+
+
 # ---------------------------------------------------------------------------
 # Chat semantic memory
 # ---------------------------------------------------------------------------

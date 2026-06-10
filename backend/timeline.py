@@ -485,7 +485,7 @@ def _extract_structured_fallback(patient_md: str) -> dict:
             for name, dose, freq in med_matches
         ]
     )
-    """Capture free-text med names even when doses are absent."""
+    # Capture free-text med names even when doses are absent.
     free_text_meds = re.findall(
         r"\b(?:has been on|now|restart)\s+([A-Za-z][A-Za-z0-9\-/]{2,})",
         cleaned,

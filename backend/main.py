@@ -385,15 +385,9 @@ async def delete_document(patient_id: str, document_id: str):
     if doc is None:
         raise _http_404("Document not found")
 
-    uploads_dir = Path(entry["folder_path"]) / "uploads"
-    filename = doc.get("filename")
-    if isinstance(filename, str) and filename:
-        source_file = uploads_dir / filename
-        extracted_file = uploads_dir / f"{filename}.extracted"
-        source_file.unlink(missing_ok=True)
-        extracted_file.unlink(missing_ok=True)
-
-    job = await jobs.start_full_rebuild(patient_id)
+    job = await jobs.start_document_deletion(patient_id, document_id)
+    if job is None:
+        raise _http_409("An ingestion or rebuild job is in progress; try again once it finishes.")
     return {"job_id": job["job_id"]}
 
 

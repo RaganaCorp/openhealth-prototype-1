@@ -437,7 +437,10 @@ def sanitize_filename(name: str) -> str:
 
 def safe_upload_path(uploads_dir: Path, filename: str) -> Path:
     """Return a safe absolute path inside uploads_dir, raising on traversal attempt."""
-    target = (uploads_dir / filename).resolve()
-    if not str(target).startswith(str(uploads_dir.resolve())):
+    base = uploads_dir.resolve()
+    target = (base / filename).resolve()
+    # Component-wise containment check — unlike a string prefix test, this is not
+    # fooled by a sibling directory that shares a prefix (e.g. ".../uploads-evil").
+    if not target.is_relative_to(base):
         raise ValueError("Path traversal detected in filename")
     return target

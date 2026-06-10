@@ -7,6 +7,7 @@ for a local single-user app (the UI polls while the process is running).
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ import memory
 import patients as pt
 import timeline as tl
 from config import load_config
+
+_logger = logging.getLogger("uvicorn.error")
 
 # ---------------------------------------------------------------------------
 # In-memory job store
@@ -81,7 +84,6 @@ def _set_phase(job: dict, phase: str, current_file: Optional[str] = None) -> Non
         prev_phase = job.get("phase")
         prev_started = job.get("phase_started_at")
         if prev_phase and prev_started:
-            from datetime import datetime, timezone
             try:
                 start_dt = datetime.fromisoformat(prev_started)
                 elapsed_ms = int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000)
@@ -116,34 +118,46 @@ def _fail_job(job: dict, error: str = "") -> None:
 # Ingestion helpers
 # ---------------------------------------------------------------------------
 
+# Bound on concurrent embedding requests per document. Embedding each chunk is an
+# independent Ollama round-trip, so we issue them in parallel instead of strictly
+# one-at-a-time; the cap keeps us from overwhelming a local Ollama instance.
+_EMBED_CONCURRENCY = 8
+
+
 async def _embed_and_upsert_chunks(
     patient_id: str,
     doc_record: dict,
     text: str,
 ) -> None:
-    """Chunk text, embed each chunk, upsert into ChromaDB _docs collection."""
+    """Chunk text, embed the chunks concurrently, upsert into the ChromaDB _docs collection."""
     cfg = load_config()
     chunks = docs_module.chunk_text(text, cfg.chunk_size, cfg.chunk_overlap)
     if not chunks:
         return
 
-    chunk_ids: list[str] = []
-    embeddings: list[list[float]] = []
-    metadatas: list[dict] = []
+    semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
 
-    for i, chunk in enumerate(chunks):
-        embedding = await ai.embed(chunk)
-        chunk_id = f"{doc_record['id']}_chunk_{i}"
-        chunk_ids.append(chunk_id)
-        embeddings.append(embedding)
-        metadatas.append({
+    async def _embed_one(chunk: str) -> list[float]:
+        async with semaphore:
+            return await ai.embed(chunk)
+
+    # gather preserves order, so embeddings[i] corresponds to chunks[i].
+    embeddings: list[list[float]] = await asyncio.gather(
+        *(_embed_one(chunk) for chunk in chunks)
+    )
+
+    chunk_ids = [f"{doc_record['id']}_chunk_{i}" for i in range(len(chunks))]
+    metadatas = [
+        {
             "patient_id": patient_id,
             "document_id": doc_record["id"],
             "filename": doc_record["filename"],
             "chunk_index": i,
             "date": doc_record.get("date_detected") or "unknown",
             "document_type": doc_record.get("document_type", "unknown"),
-        })
+        }
+        for i in range(len(chunks))
+    ]
 
     await memory.upsert_doc_chunks(
         patient_id=patient_id,
@@ -159,7 +173,11 @@ def _file_changed(file_path: Path, doc_record: dict) -> bool:
     try:
         current_mtime = os.path.getmtime(file_path)
         current_size = os.path.getsize(file_path)
-    except OSError:
+    except OSError as exc:
+        # File became inaccessible between the directory scan and now (e.g. a
+        # transient lock or a concurrent delete). Skip it rather than failing the
+        # whole batch, but surface it instead of skipping silently.
+        _logger.warning("could not stat %s during change detection: %s; skipping", file_path, exc)
         return False
     return (
         current_mtime != doc_record.get("mtime")
@@ -312,6 +330,21 @@ async def start_full_rebuild(patient_id: str) -> dict:
         return active
     job = _create_job(patient_id)
     asyncio.create_task(_run_rebuild(patient_id, job))
+    return job
+
+
+async def start_document_deletion(patient_id: str, document_id: str) -> Optional[dict]:
+    """Incrementally delete one document: remove its files and vector chunks,
+    rebuild patient.md from the remaining documents, and regenerate the summary —
+    without re-extracting or re-embedding the rest of the record.
+
+    Returns None if a job is already running for this patient (the caller should
+    surface a conflict); the deletion targets a specific document and cannot be
+    safely coalesced like a refresh."""
+    if get_active_job(patient_id) is not None:
+        return None
+    job = _create_job(patient_id)
+    asyncio.create_task(_run_document_deletion(patient_id, job, document_id))
     return job
 
 
@@ -480,6 +513,83 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         _set_phase(job, "saving", "patient.json")
         await pt.mutate_patient_record(patient_id, _apply)
         await pt.update_ingestion_stats(patient_id, len(new_docs))
+
+        _complete_job(job)
+
+    except Exception as e:
+        _fail_job(job, str(e))
+    finally:
+        _schedule_followup_if_pending(patient_id)
+
+
+async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -> None:
+    try:
+        _set_phase(job, "loading")
+        entry = await pt.find_patient_by_id(patient_id)
+        if entry is None:
+            _fail_job(job, "Patient not found")
+            return
+
+        record = await pt.load_patient_record(patient_id)
+        if record is None:
+            _fail_job(job, "patient.json not found")
+            return
+
+        doc = next(
+            (d for d in record.get("documents", []) if d.get("id") == document_id), None
+        )
+        if doc is None:
+            _fail_job(job, "Document not found")
+            return
+
+        patient_folder = Path(entry["folder_path"])
+        uploads_dir = patient_folder / "uploads"
+        job["total"] = 1
+
+        # 1. Delete the source file and its cached extraction sidecar.
+        filename = doc.get("filename")
+        _set_phase(job, "deleting_files", filename)
+        if isinstance(filename, str) and filename:
+            (uploads_dir / filename).unlink(missing_ok=True)
+            (uploads_dir / f"{filename}.extracted").unlink(missing_ok=True)
+
+        # 2. Drop only this document's chunks from the vector store.
+        _set_phase(job, "removing_chunks")
+        await memory.delete_doc_chunks(patient_id, document_id)
+
+        # 3. Rebuild patient.md from the remaining documents (sidecar reads only —
+        #    no re-extraction or re-embedding).
+        remaining = [d for d in record.get("documents", []) if d.get("id") != document_id]
+        _set_phase(job, "rebuilding_patient_md", "patient.md")
+        await asyncio.to_thread(_rebuild_patient_md, patient_folder, remaining)
+        await asyncio.to_thread(
+            docs_module.upsert_summary_overrides_section,
+            patient_folder,
+            record.get("summary_overrides"),
+        )
+
+        # 4. Regenerate the summary so it no longer reflects the removed document.
+        new_summary = ""
+        if remaining:
+            patient_md_text = await asyncio.to_thread(
+                docs_module.read_patient_md, patient_folder
+            )
+            _set_phase(job, "generating_summary", "summary")
+            cfg = load_config()
+            new_summary = await tl.generate_summary(
+                patient_md_text,
+                record.get("summary_overrides"),
+                model=cfg.summary_model,
+            )
+
+        def _apply(r: dict) -> None:
+            r["documents"] = remaining
+            r["summary"] = new_summary
+
+        _set_phase(job, "saving", "patient.json")
+        await pt.mutate_patient_record(patient_id, _apply)
+        await pt.update_ingestion_stats(patient_id, len(remaining))
+        job["processed"] = 1
 
         _complete_job(job)
 
