@@ -67,7 +67,24 @@ def get_active_job(patient_id: str) -> Optional[dict]:
     return None
 
 
+# Keep at most this many finished job records in memory; older ones are pruned
+# so long-running sessions (e.g. many watcher-triggered ingests) don't grow the
+# table without bound. Running jobs are never pruned.
+_MAX_FINISHED_JOBS = 50
+
+
+def _prune_finished_jobs() -> None:
+    finished = [jid for jid, job in _jobs.items() if job.get("status") != "running"]
+    excess = len(finished) - _MAX_FINISHED_JOBS
+    if excess <= 0:
+        return
+    # Dict insertion order ≈ creation order, so the front of the list is oldest.
+    for jid in finished[:excess]:
+        _jobs.pop(jid, None)
+
+
 def _create_job(patient_id: str) -> dict:
+    _prune_finished_jobs()
     job_id = str(uuid.uuid4())
     started_at = _now()
     job = {
@@ -425,15 +442,21 @@ async def _run_incremental(
             updated_docs[doc_record["filename"]] = doc_record
             job["processed"] += 1
 
-        # Rebuild patient.md from all documents.
+        # Rebuild patient.md from all documents, under the per-patient lock so
+        # a concurrent summary-overrides edit can't interleave with the rebuild.
+        # Overrides are re-read fresh inside the lock so an edit made while files
+        # were processing isn't reverted by this job's stale record snapshot.
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         all_doc_records = list(updated_docs.values())
-        await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
-        await asyncio.to_thread(
-            docs_module.upsert_summary_overrides_section,
-            patient_folder,
-            record.get("summary_overrides"),
-        )
+        async with pt.record_lock(patient_id):
+            await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
+            fresh_record = await asyncio.to_thread(pt._load_patient_record_sync, folder_slug)
+            overrides = (fresh_record or record).get("summary_overrides")
+            await asyncio.to_thread(
+                docs_module.upsert_summary_overrides_section,
+                patient_folder,
+                overrides,
+            )
 
         # Update patient.json. Compute owned fields first, then persist only
         # those via mutate_patient_record so a concurrent chat write (e.g.
@@ -449,7 +472,7 @@ async def _run_incremental(
             cfg = load_config()
             new_summary = await tl.generate_summary(
                 patient_md_text,
-                record.get("summary_overrides"),
+                overrides,
                 model=cfg.summary_model,
             )
 
@@ -509,12 +532,15 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
             job["processed"] += 1
 
         _set_phase(job, "rebuilding_patient_md", "patient.md")
-        await asyncio.to_thread(_rebuild_patient_md, patient_folder, new_docs)
-        await asyncio.to_thread(
-            docs_module.upsert_summary_overrides_section,
-            patient_folder,
-            record.get("summary_overrides"),
-        )
+        async with pt.record_lock(patient_id):
+            await asyncio.to_thread(_rebuild_patient_md, patient_folder, new_docs)
+            fresh_record = await asyncio.to_thread(pt._load_patient_record_sync, folder_slug)
+            overrides = (fresh_record or record).get("summary_overrides")
+            await asyncio.to_thread(
+                docs_module.upsert_summary_overrides_section,
+                patient_folder,
+                overrides,
+            )
 
         patient_md_text = await asyncio.to_thread(
             docs_module.read_patient_md, patient_folder
@@ -524,7 +550,7 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         cfg = load_config()
         new_summary = await tl.generate_summary(
             patient_md_text,
-            record.get("summary_overrides"),
+            overrides,
             model=cfg.summary_model,
         )
 
@@ -583,12 +609,17 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
         #    no re-extraction or re-embedding).
         remaining = [d for d in record.get("documents", []) if d.get("id") != document_id]
         _set_phase(job, "rebuilding_patient_md", "patient.md")
-        await asyncio.to_thread(_rebuild_patient_md, patient_folder, remaining)
-        await asyncio.to_thread(
-            docs_module.upsert_summary_overrides_section,
-            patient_folder,
-            record.get("summary_overrides"),
-        )
+        async with pt.record_lock(patient_id):
+            await asyncio.to_thread(_rebuild_patient_md, patient_folder, remaining)
+            fresh_record = await asyncio.to_thread(
+                pt._load_patient_record_sync, entry["folder_slug"]
+            )
+            overrides = (fresh_record or record).get("summary_overrides")
+            await asyncio.to_thread(
+                docs_module.upsert_summary_overrides_section,
+                patient_folder,
+                overrides,
+            )
 
         # 4. Regenerate the summary so it no longer reflects the removed document.
         new_summary = ""
@@ -600,7 +631,7 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
             cfg = load_config()
             new_summary = await tl.generate_summary(
                 patient_md_text,
-                record.get("summary_overrides"),
+                overrides,
                 model=cfg.summary_model,
             )
 

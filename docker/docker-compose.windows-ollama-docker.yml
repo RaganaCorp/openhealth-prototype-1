@@ -16,7 +16,8 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Note: the /api/backend rewrite is baked into the image at build time;
+      # this runtime value only documents the target (it matches the build ARG).
       - BACKEND_API_URL=http://backend:8000
     networks:
       - openhealth_net

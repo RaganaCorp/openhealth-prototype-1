@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -75,15 +76,32 @@ def load_config() -> Config:
 
 
 def save_config(cfg: Config) -> None:
+    # Atomic write (temp file + rename): a crash mid-write must not corrupt
+    # config.json, since load_config would then fail on every request.
     _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_CONFIG_FILE, "w") as f:
-        json.dump(cfg.model_dump(), f, indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(_CONFIG_FILE.parent), prefix=f"{_CONFIG_FILE.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg.model_dump(), f, indent=2)
+        os.replace(tmp_name, _CONFIG_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def patch_config(updates: dict[str, Any]) -> Config:
     cfg = load_config()
     data = cfg.model_dump()
     data.update(updates)
+    if data["chunk_overlap"] >= data["chunk_size"]:
+        # Otherwise chunk_text degenerates to a step of 1 and produces roughly
+        # one chunk per character — an embedding explosion on the next ingest.
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
     updated = Config(**data)
     save_config(updated)
     return updated

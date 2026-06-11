@@ -8,24 +8,36 @@ type IngestionProgressProps = {
   jobId: string;
   onResolved?: (job: JobStatus) => void | Promise<void>;
   onDismiss?: () => void;
+  // Called when the job's status becomes unreachable (e.g. the backend restarted
+  // and its in-memory job record is gone) so the parent can unblock the UI.
+  onTerminalError?: () => void;
 };
 
-export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionProgressProps) {
+export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalError }: IngestionProgressProps) {
   const [job, setJob] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const resolvedRef = useRef(false);
   const onResolvedRef = useRef(onResolved);
+  const onTerminalErrorRef = useRef(onTerminalError);
 
-  // Keep the latest onResolved in a ref so it isn't an effect dependency. The
-  // parent passes a fresh inline callback on every render; depending on it would
+  // Keep the latest callbacks in refs so they aren't effect dependencies. The
+  // parent passes fresh inline callbacks on every render; depending on them would
   // tear down and recreate the poll interval (and reset resolvedRef) each time.
   useEffect(() => {
     onResolvedRef.current = onResolved;
+    onTerminalErrorRef.current = onTerminalError;
   });
 
   useEffect(() => {
     let cancelled = false;
     let intervalId: number | undefined;
+    let consecutiveErrors = 0;
+
+    function stopPolling() {
+      if (intervalId !== undefined) {
+        window.clearInterval(intervalId);
+      }
+    }
 
     async function load() {
       try {
@@ -34,21 +46,34 @@ export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionPro
           return;
         }
 
+        consecutiveErrors = 0;
+        setError(null);
         setJob(nextJob);
         if (nextJob.status !== "running") {
           // Terminal (complete or failed) — stop polling so a finished or failed
           // job never keeps hitting the backend every 2s.
-          if (intervalId !== undefined) {
-            window.clearInterval(intervalId);
-          }
+          stopPolling();
           if (!resolvedRef.current) {
             resolvedRef.current = true;
             await onResolvedRef.current?.(nextJob);
           }
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Could not load job status");
+        if (cancelled) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : "Could not load job status";
+        consecutiveErrors += 1;
+        // A 404 means the job record no longer exists (jobs are in-memory, so a
+        // backend restart loses them); persistent errors mean polling is futile.
+        // Either way, stop — otherwise this polls a dead job forever with the
+        // chat locked.
+        if (message === "Job not found" || consecutiveErrors >= 5) {
+          stopPolling();
+          setError(`${message}. The job's status is no longer available.`);
+          onTerminalErrorRef.current?.();
+        } else {
+          setError(message);
         }
       }
     }
@@ -61,14 +86,21 @@ export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionPro
 
     return () => {
       cancelled = true;
-      if (intervalId !== undefined) {
-        window.clearInterval(intervalId);
-      }
+      stopPolling();
     };
   }, [jobId]);
 
   if (error) {
-    return <div className="status-error">{error}</div>;
+    return (
+      <div className="status-error flex flex-wrap items-center justify-between gap-3">
+        <span>{error}</span>
+        {onDismiss ? (
+          <button className="button-secondary px-3 py-1 text-xs" onClick={onDismiss} type="button">
+            Dismiss
+          </button>
+        ) : null}
+      </div>
+    );
   }
 
   if (!job) {

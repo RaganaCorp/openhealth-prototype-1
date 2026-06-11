@@ -37,8 +37,13 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
               memory_results_override?: number | null;
               context_window_tokens_override?: number | null;
             } = {};
-            if (name.trim() !== patient.name) {
-              updates.name = name.trim();
+            const trimmedName = name.trim();
+            if (!trimmedName) {
+              setError("Patient name cannot be empty.");
+              return;
+            }
+            if (trimmedName !== patient.name) {
+              updates.name = trimmedName;
             }
 
             // Blank => clear the override (null). Otherwise require a positive

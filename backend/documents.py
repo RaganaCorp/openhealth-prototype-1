@@ -10,7 +10,10 @@ Scan rules:
 import asyncio
 import html as html_module
 import json
+import os
 import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -183,18 +186,46 @@ _DATE_PATTERNS = [
 ]
 
 
+def _normalize_date(raw: str) -> str:
+    """Convert a detected date string to ISO (YYYY-MM-DD) so chronological
+    sorting works across mixed source formats. Falls back to the raw string."""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d, %Y", "%B %d %Y"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return raw
+
+
 def detect_date(text: str) -> Optional[str]:
-    """Return the first recognisable date string found in the first 2000 chars."""
+    """Return the first recognisable date in the first 2000 chars, normalised to ISO."""
     for pattern in _DATE_PATTERNS:
         m = re.search(pattern, text[:2000], re.IGNORECASE)
         if m:
-            return m.group(0)
+            return _normalize_date(m.group(0))
     return None
 
 
 # ---------------------------------------------------------------------------
 # patient.md writer
 # ---------------------------------------------------------------------------
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via a unique temp file + atomic rename so a concurrent reader
+    (e.g. the chat pipeline reading patient.md) never sees a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
 
 def write_patient_md(patient_folder: Path, docs: list[dict]) -> None:
     """
@@ -217,7 +248,7 @@ def write_patient_md(patient_folder: Path, docs: list[dict]) -> None:
         lines.append(f"{half_sep} END: {doc['filename']} {half_sep}")
         lines.append("")
         lines.append("")
-    (patient_folder / "patient.md").write_text("\n".join(lines), encoding="utf-8")
+    _atomic_write_text(patient_folder / "patient.md", "\n".join(lines))
 
 
 def read_patient_md(patient_folder: Path) -> str:
@@ -269,4 +300,4 @@ def upsert_summary_overrides_section(patient_folder: Path, overrides: Optional[d
     else:
         updated = (current.rstrip() + "\n\n" + block).strip() if current.strip() else block
 
-    f.write_text(updated + "\n", encoding="utf-8")
+    _atomic_write_text(f, updated + "\n")

@@ -251,6 +251,11 @@ async def patch_patient(patient_id: str, body: PatchPatientRequest):
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No fields to update")
+    if "name" in updates:
+        name = updates["name"]
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=422, detail="Patient name cannot be empty")
+        updates["name"] = name.strip()
     result = await pt.patch_patient(patient_id, updates)
     if result is None:
         raise _http_404("Patient not found")
@@ -448,7 +453,9 @@ async def update_summary_overrides(patient_id: str, body: SummaryOverridesReques
     )
 
     patient_folder = Path(entry["folder_path"])
-    await asyncio.to_thread(docs_module.upsert_summary_overrides_section, patient_folder, overrides)
+    # Serialise with ingestion jobs, which rebuild patient.md under the same lock.
+    async with pt.record_lock(patient_id):
+        await asyncio.to_thread(docs_module.upsert_summary_overrides_section, patient_folder, overrides)
     return overrides
 
 
@@ -892,7 +899,10 @@ async def get_config():
 @app.post("/config")
 async def update_config(body: ConfigUpdateRequest):
     updates = body.model_dump(exclude_none=True)
-    updated = patch_config(updates)
+    try:
+        updated = patch_config(updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return updated.model_dump()
 
 

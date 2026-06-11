@@ -46,7 +46,7 @@ The `./data/` directory is **git-ignored**. It is created automatically on first
 
 All services communicate on an internal Docker network (`openhealth_net` or equivalent). Only the frontend and backend ports are exposed to the host.
 
-- Frontend calls backend at `http://backend:8000` (internal) — configured via `NEXT_PUBLIC_API_URL` environment variable.
+- The browser calls the backend directly at `http://localhost:8000` (the frontend API client defaults to the page host); the `/api/backend` rewrite to `http://backend:8000` is baked into the frontend image at build time via the `BACKEND_API_URL` build arg.
 - Backend calls Ollama at the URL specified in `config.json` `ollama_base_url`. Default: `http://ollama:11434` (internal, when Ollama service is running). Users pointing to host Ollama set this to `http://host.docker.internal:11434` via `POST /config` or by editing `config.json` directly.
 
 ---
@@ -154,8 +154,7 @@ Both installers derive the required Ollama models from `backend/config.defaults.
 
 | Variable | Service | Default | Description |
 |---|---|---|---|
-| `NEXT_PUBLIC_API_URL` | frontend | `http://localhost:8000` | Backend URL as seen from the browser |
-| `BACKEND_API_URL` | frontend (SSR) | `http://backend:8000` | Backend URL for server-side rendering calls |
+| `BACKEND_API_URL` | frontend (build arg) | `http://backend:8000` | `/api/backend` rewrite target, baked into the image at build time |
 | `DATA_PATH` | backend | `/data` | Root data directory inside container |
 | `OLLAMA_BASE_URL` | backend | `http://ollama:11434` | Ollama endpoint (overridden by `config.json` at runtime) |
 | `OPENHEALTH_PROTOTYPE1_IMAGE_TAG` | frontend + backend | `latest` | Optional override for the Ragana prototype image tag |

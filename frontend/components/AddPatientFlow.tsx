@@ -35,13 +35,23 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
     setError(null);
   }
 
+  function dismiss() {
+    // If a patient was already created, complete (so the parent refreshes its
+    // patient list) rather than silently closing — otherwise the new patient
+    // is missing from the list until a reload. Any in-flight ingestion keeps
+    // running server-side and the workspace picks it up via job detection.
+    if (patient) {
+      onComplete(patient, false);
+    } else {
+      onClose();
+    }
+    reset();
+  }
+
   return (
     <div
       className="modal-overlay"
-      onClick={() => {
-        reset();
-        onClose();
-      }}
+      onClick={dismiss}
       role="presentation"
     >
       <div className="modal-panel max-w-2xl" onClick={(event) => event.stopPropagation()}>
@@ -149,7 +159,11 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
                     reset();
                     router.push(`/patient/${patient.id}`);
                   }
+                  // On failure the banner stays visible (with a Dismiss button)
+                  // so the error is surfaced before the modal closes.
                 }}
+                onDismiss={dismiss}
+                onTerminalError={dismiss}
               />
             </div>
           </div>

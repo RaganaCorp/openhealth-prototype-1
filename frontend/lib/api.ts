@@ -303,7 +303,8 @@ export function sendChat(patientId: string, chatSessionId: string, message: stri
   return request<{
     response: string;
     grounding_retried: boolean;
-    thinking?: string;
+    retry_count: number;
+    thinking?: string | null;
     citations: Citation[];
   }>(`/chat`, {
     method: "POST",

@@ -55,12 +55,20 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
     sessionId: null,
   });
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // Tracks the session currently in view so a slow response (message load or a
+  // long-running send) can't overwrite the view after the user switched sessions.
+  const currentSessionIdRef = useRef<string | null>(session?.id ?? null);
 
   async function loadMessages(sessionId: string) {
     try {
       setLoadingMessages(true);
       setError(null);
       const log = await getMessages(patientId, sessionId);
+      if (currentSessionIdRef.current !== sessionId) {
+        // The user moved to another session while this request was in flight —
+        // applying it would render the wrong conversation under this view.
+        return;
+      }
       setMessages((current) => {
         // Keep ALL in-flight local messages across all sessions so that
         // navigating away and back never drops a pending/failed message.
@@ -86,8 +94,17 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   }
 
   useEffect(() => {
+    currentSessionIdRef.current = session?.id ?? null;
     if (!session) {
-      setMessages([]);
+      // Clear server messages but keep in-flight/failed local messages — they
+      // belong to their own sessions and are filtered at render time.
+      setMessages((current) =>
+        current.filter(
+          (m) =>
+            m.id.startsWith("local-") &&
+            (m.localStatus === "failed" || m.localStatus === "pending")
+        )
+      );
       setTitleDraft("New Chat");
       return;
     }
@@ -101,6 +118,11 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
 
   const isDraftSession = !session;
   const sessionTitle = session?.title ?? "New Chat";
+  // Local (in-flight/failed) messages show only in their own session's view.
+  // In a draft chat (no session yet) they're keyed by the "__pending__" marker.
+  const visibleMessages = messages.filter(
+    (m) => !m.id.startsWith("local-") || m.localSessionId === (session?.id ?? "__pending__")
+  );
 
   return (
     <>
@@ -160,12 +182,12 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
       <div className="flex-1 overflow-y-auto py-5">
         {loadingMessages ? <div className="empty-state">Loading messages...</div> : null}
         {error ? <div className="status-error mb-4">{error}</div> : null}
-        {!loadingMessages && messages.filter((m) => !m.id.startsWith("local-") || m.localSessionId === session?.id).length === 0 ? <div className="empty-state">No messages yet. Start with a plain-English question.</div> : null}
+        {!loadingMessages && visibleMessages.length === 0 ? <div className="empty-state">No messages yet. Start with a plain-English question.</div> : null}
         <div className="space-y-5">
-          {messages.filter((m) => !m.id.startsWith("local-") || m.localSessionId === session?.id).map((message, index) => {
+          {visibleMessages.map((message, index) => {
             const isAssistant = message.role === "assistant";
             const showRefined = Boolean(
-              isAssistant && refinedResponseContent && message.content === refinedResponseContent && index === messages.length - 1
+              isAssistant && refinedResponseContent && message.content === refinedResponseContent && index === visibleMessages.length - 1
             );
             const assistantHtml = isAssistant
               ? DOMPurify.sanitize(marked.parse(message.content) as string)
@@ -273,6 +295,9 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                   : m
               )
             );
+            // Restore the message text so it can be edited and re-sent (unless
+            // the user has already started typing something new).
+            setDraft((current) => (current ? current : message));
             setError(err instanceof Error ? err.message : "Could not send message");
           } finally {
             setLoading(false);

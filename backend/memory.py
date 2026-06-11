@@ -186,6 +186,7 @@ def _delete_doc_chunks_sync(patient_id: str, document_id: str) -> None:
                 "ChromaDB error during doc-chunk delete patient_id=%s document_id=%s",
                 patient_id,
                 document_id,
+                exc_info=True,
             )
 
 
