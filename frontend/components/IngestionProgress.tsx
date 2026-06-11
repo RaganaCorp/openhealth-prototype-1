@@ -7,15 +7,17 @@ import { getJobStatus, type JobStatus } from "@/lib/api";
 type IngestionProgressProps = {
   jobId: string;
   onResolved?: (job: JobStatus) => void | Promise<void>;
+  onDismiss?: () => void;
 };
 
-export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps) {
+export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionProgressProps) {
   const [job, setJob] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const resolvedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    let intervalId: number | undefined;
 
     async function load() {
       try {
@@ -25,9 +27,16 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
         }
 
         setJob(nextJob);
-        if (nextJob.status !== "running" && onResolved && !resolvedRef.current) {
-          resolvedRef.current = true;
-          await onResolved(nextJob);
+        if (nextJob.status !== "running") {
+          // Terminal (complete or failed) — stop polling so a finished or failed
+          // job never keeps hitting the backend every 2s.
+          if (intervalId !== undefined) {
+            window.clearInterval(intervalId);
+          }
+          if (onResolved && !resolvedRef.current) {
+            resolvedRef.current = true;
+            await onResolved(nextJob);
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -38,13 +47,15 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
 
     resolvedRef.current = false;
     void load();
-    const interval = window.setInterval(() => {
+    intervalId = window.setInterval(() => {
       void load();
     }, 2000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      if (intervalId !== undefined) {
+        window.clearInterval(intervalId);
+      }
     };
   }, [jobId, onResolved]);
 
@@ -110,7 +121,14 @@ export function IngestionProgress({ jobId, onResolved }: IngestionProgressProps)
             {job.status === "running" ? runningText : job.status === "complete" ? "Ready" : "Needs Review"}
           </p>
         </div>
-        <span className={tone}>{job.status === "running" ? "Processing" : job.status === "complete" ? "Ready" : "Needs Review"}</span>
+        <div className="flex items-center gap-2">
+          <span className={tone}>{job.status === "running" ? "Processing" : job.status === "complete" ? "Ready" : "Needs Review"}</span>
+          {job.status === "failed" && onDismiss ? (
+            <button className="button-secondary px-3 py-1 text-xs" onClick={onDismiss} type="button">
+              Dismiss
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-background">

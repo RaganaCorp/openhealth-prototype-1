@@ -242,10 +242,18 @@ export default function PatientPage() {
                 onResolved={async (job) => {
                   await refreshSidebar();
                   await refreshRecordView();
+                  // Job is terminal — stop treating it as active so chat and
+                  // record actions unblock immediately.
+                  setActiveJob(null);
+                  // On success, hide the banner; on failure keep it visible
+                  // (with a Dismiss button) so the error stays surfaced.
                   if (job.status === "complete") {
-                    setActiveJob(null);
                     setTrackedJobId(null);
                   }
+                }}
+                onDismiss={() => {
+                  setActiveJob(null);
+                  setTrackedJobId(null);
                 }}
               />
             </div>
