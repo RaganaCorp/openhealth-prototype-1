@@ -137,7 +137,6 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 await updateConfig({
                   chat_model: config.chat_model,
                   clinical_model: config.clinical_model,
-                  summary_model: config.summary_model,
                   verification_model: config.verification_model,
                   embedding_model: config.embedding_model,
                   chunk_size: config.chunk_size,
@@ -173,7 +172,6 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       ...config,
                       chat_model: fastModel,
                       clinical_model: medicalModel,
-                      summary_model: medicalModel,
                       verification_model: medicalModel,
                       routing_mode: "balanced",
                       medgemma_verification_enabled: true,
@@ -202,29 +200,16 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               </select>
             </label>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <label className="field-group">
-                <span className="field-label">Clinical model</span>
-                <select className="field-input" onChange={(event) => setConfig({ ...config, clinical_model: event.target.value })} value={config.clinical_model}>
-                  {models.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="field-group">
-                <span className="field-label">Summary model</span>
-                <select className="field-input" onChange={(event) => setConfig({ ...config, summary_model: event.target.value })} value={config.summary_model}>
-                  {models.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
+            <label className="field-group">
+              <span className="field-label">Clinical model</span>
+              <select className="field-input" onChange={(event) => setConfig({ ...config, clinical_model: event.target.value })} value={config.clinical_model}>
+                {models.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            </label>
 
             <label className="field-group">
               <span className="field-label">Verification model</span>

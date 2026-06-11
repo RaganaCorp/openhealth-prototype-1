@@ -115,7 +115,6 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
     loading: "Loading patient record",
     processing_files: "Extracting and embedding files",
     rebuilding_patient_md: "Rebuilding patient document",
-    generating_summary: "Generating summary",
     saving: "Saving updates",
     complete: "Ready",
     failed: "Needs Review",
@@ -138,7 +137,6 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
     loading: 10_000,
     processing_files: 45_000,
     rebuilding_patient_md: 15_000,
-    generating_summary: 40_000,
     saving: 10_000,
   };
 

@@ -1,6 +1,6 @@
 # OpenHealth Prototype
 
-A local-first medical record workspace with summary, and grounded chat.
+A local-first medical record workspace with grounded chat over patient records.
 
 ## Table of Contents
 - [Machine Requirements](#machine-requirements)

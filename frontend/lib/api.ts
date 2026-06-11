@@ -76,17 +76,9 @@ export type PatientDocument = {
   size: number;
 };
 
-export type SummaryOverrides = {
-  active_conditions: string;
-  current_medications: string;
-  recent_procedures: string;
-  key_concerns: string;
-};
-
 export type AppConfig = {
   chat_model: string;
   clinical_model: string;
-  summary_model: string;
   verification_model: string;
   embedding_model: string;
   embed_timeout_seconds: number;
@@ -250,25 +242,6 @@ export function deleteDocument(patientId: string, documentId: string) {
 
 export function getJobStatus(jobId: string) {
   return request<JobStatus>(`/status/${jobId}`);
-}
-
-export function getSummary(patientId: string) {
-  return request<{ summary: string }>(`/summary/${patientId}`);
-}
-
-export function regenerateSummary(patientId: string) {
-  return request<{ summary: string }>(`/summary/${patientId}`, { method: "POST" });
-}
-
-export function getSummaryOverrides(patientId: string) {
-  return request<SummaryOverrides>(`/summary-overrides/${patientId}`);
-}
-
-export function updateSummaryOverrides(patientId: string, overrides: SummaryOverrides) {
-  return request<SummaryOverrides>(`/summary-overrides/${patientId}`, {
-    method: "POST",
-    body: JSON.stringify(overrides),
-  });
 }
 
 export function getChatSessions(patientId: string) {

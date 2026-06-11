@@ -82,7 +82,7 @@ export default function HomePage() {
           <p className="eyebrow">What This Builds</p>
           <h2 className="text-2xl font-semibold text-text-primary">A calm, local clinical workspace</h2>
           <div className="mt-5 space-y-4 text-sm leading-6 text-text-secondary">
-            <p>The summary panel stays beside the chat so source facts and interpretation remain separate.</p>
+            <p>Chat sits beside the patient's records so answers stay grounded in the source documents.</p>
             <p>Uploads trigger ingestion jobs with visible progress, and citations stay attached to every assistant response.</p>
             <p>Global model settings live in the source-controlled defaults file and can be overridden through the mounted runtime config.</p>
           </div>

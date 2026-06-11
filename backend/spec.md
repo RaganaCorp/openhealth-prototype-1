@@ -34,7 +34,7 @@ backend/
 ├── main.py         # FastAPI routes (all endpoints)
 ├── memory.py       # ChromaDB wrapper (doc chunks + chat history collections)
 ├── patients.py     # JSON persistence for patient index, patient.json, chat message logs
-├── timeline.py     # LLM calls: summary generation, grounding/citation verification, conversation-state updates, session-title generation, query classification
+├── timeline.py     # LLM calls: grounding/citation verification, conversation-state updates, session-title generation, query classification
 ├── watcher.py      # watchdog-based watcher; monitors uploads/ per patient
 ├── Dockerfile
 └── requirements.txt  # fastapi, uvicorn, pymupdf, pytesseract, chromadb, watchdog, pillow
@@ -83,20 +83,9 @@ PDFs / TIFFs / TXTs / HTMLs / JSONs
         │
         ▼
   write_patient.md  (all docs concatenated with document boundaries)
-        │
-        └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
-                                           ├── Pass 1: structured extraction
-                                           │   (conditions / medications / procedures / labs → JSON)
-                                           └── Pass 2: prose generation from pre-extracted facts
-                                               (fallback: inject pass-1 items directly if LLM drops a section)
 ```
 
 Ingestion always runs as a **background job**. The endpoint returns `{ job_id }` immediately. Frontend polls `/status/{job_id}` every 2 seconds for progress.
-
-**Summary generation — two-pass approach**: because patient records arrive in wildly different formats (CCD exports, portal HTML, PDFs, JSON), deterministic extraction is not reliable across all formats. `generate_summary()` in `timeline.py` therefore makes two LLM calls:
-
-1. **Pass 1 — structured extraction**: sends the filtered clinical sections (output of `_prepare_summary_records()`) to the LLM with a strict extraction-only prompt. Returns a JSON object: `{ demographics, conditions, medications, procedures, allergies, key_labs, concerns }`. No prose is requested.
-2. **Pass 2 — prose generation**: `_build_structured_input()` formats the Pass 1 JSON as pre-verified bullet lists. These are prepended to the summary prompt so the LLM writes prose *around known facts* rather than discovering them. After generation, `_inject_pass1_fallbacks()` checks each output section: if the LLM returned "No clear evidence" for a section that had items in Pass 1, the items are injected directly from the structured data, bypassing the LLM for that section.
 
 ### Triggers
 
@@ -111,7 +100,7 @@ If a source file is detected as changed, its `.extracted` sidecar is **overwritt
 
 ### Full rebuild (`POST /rebuild/{patient_id}`)
 
-Clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. The summary is also regenerated. Chat history in `_chat` collections is **never cleared** on any rebuild.
+Clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. Chat history in `_chat` collections is **never cleared** on any rebuild.
 
 ---
 
@@ -239,7 +228,6 @@ update_conversation_state()    ← refresh rolling summary + unresolved question
   "last_ingested_at": "ISO timestamp",
   "document_count": 12,
   "documents": [],
-  "summary": "string",
   "chat_sessions": [],
   "conversation_states": {},
   "memory_results_override": null,
@@ -353,11 +341,6 @@ Flat ordered log; source of truth for rendering chat history in the UI. Separate
 
 - `POST /patients/{id}/upload` — multipart/form-data; one or more files. Writes files to `./data/patients/{slug}/uploads/`. Triggers incremental ingestion automatically. Returns `{ filenames: [], job_id }`.
 
-### Summary
-
-- `GET /summary/{patient_id}` — returns `{ "summary": "markdown string" }`.
-- `POST /summary/{patient_id}` — regenerates summary via LLM; returns `{ "summary": "markdown string" }`.
-
 ### Chat
 
 - `POST /chat`
@@ -458,28 +441,6 @@ Return:
 - citations for every supported claim
 - an uncertainty note where evidence is insufficient
 Do not add new clinical facts that are not in evidence.
-```
-
-### Summary generation
-```
-You are a medical summarization assistant. Be precise and factual.
-Based on the following medical documents, produce a markdown-formatted summary
-using the exact section headers below. Keep each section concise.
-
-## Overview
-3-4 sentences summarizing the patient's overall medical history.
-
-## Active Conditions
-List current diagnosed conditions.
-
-## Current Medications
-List medications with dosage where available.
-
-## Recent Procedures
-List recent procedures or hospitalizations.
-
-## Key Concerns
-Note patterns, gaps, or items that warrant attention.
 ```
 
 ### JSON extraction

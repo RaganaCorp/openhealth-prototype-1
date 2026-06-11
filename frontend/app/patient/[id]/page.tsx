@@ -7,7 +7,6 @@ import { startTransition, useEffect, useRef, useState } from "react";
 import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
 import { IngestionProgress } from "@/components/IngestionProgress";
-import { SummaryPanel } from "@/components/SummaryPanel";
 import { UploadArea } from "@/components/UploadArea";
 import {
   createChatSession,
@@ -18,14 +17,13 @@ import {
   getDocuments,
   getPatient,
   getPatients,
-  getSummary,
   type ChatSession,
   type JobStatus,
   type Patient,
   type PatientDocument,
 } from "@/lib/api";
 
-type MainTab = "summary" | "chat" | "files";
+type MainTab = "chat" | "files";
 
 export default function PatientPage() {
   const params = useParams<{ id: string }>();
@@ -37,7 +35,6 @@ export default function PatientPage() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [summary, setSummary] = useState("");
   const [documents, setDocuments] = useState<PatientDocument[]>([]);
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
   const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
@@ -72,11 +69,10 @@ export default function PatientPage() {
 
   async function refreshRecordView() {
     const pid = patientId;
-    const [summaryData, documentsData] = await Promise.all([getSummary(pid), getDocuments(pid)]);
+    const documentsData = await getDocuments(pid);
     if (patientIdRef.current !== pid) {
       return;
     }
-    setSummary(summaryData.summary);
     setDocuments(documentsData);
   }
 
@@ -115,7 +111,6 @@ export default function PatientPage() {
     patientIdRef.current = patientId;
     setLoading(true);
     setPatient(null);
-    setSummary("");
     setDocuments([]);
     setSessions([]);
     setActiveJob(null);
@@ -254,13 +249,6 @@ export default function PatientPage() {
           <div className="mb-4 border-b border-border/80 pb-2">
             <div className="flex">
               <button
-                className={`tab-button ${activeTab === "summary" ? "active" : ""}`}
-                onClick={() => setActiveTab("summary")}
-                type="button"
-              >
-                Summary
-              </button>
-              <button
                 className={`tab-button ${activeTab === "chat" ? "active" : ""}`}
                 onClick={() => setActiveTab("chat")}
                 type="button"
@@ -306,16 +294,6 @@ export default function PatientPage() {
                   setTrackedJobId(null);
                   setTrackedJobTerminal(false);
                 }}
-              />
-            </div>
-          ) : null}
-
-          {activeTab === "summary" ? (
-            <div className="panel-scroll flex-1">
-              <SummaryPanel
-                onSummaryUpdated={(nextSummary) => setSummary(nextSummary)}
-                patientId={patient.id}
-                summary={summary}
               />
             </div>
           ) : null}

@@ -93,7 +93,6 @@ $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
 $models = @(
     $cfg.chat_model
     $cfg.clinical_model
-    $cfg.summary_model
     $cfg.verification_model
     $cfg.embedding_model
 ) | Where-Object { $_ } | Sort-Object -Unique

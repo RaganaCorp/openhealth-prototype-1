@@ -35,8 +35,7 @@ frontend/
 │   ├── Citation.tsx                 # Citation block rendered below assistant messages
 │   ├── DeletePatientModal.tsx       # Confirmation modal with per-item checkboxes
 │   ├── IngestionProgress.tsx        # Job progress bar; polls /status/{job_id}
-│   ├── PatientSettings.tsx          # Patient settings form (rename, overrides, regenerate, delete)
-│   └── SummaryPanel.tsx             # Renders summary markdown string as sanitized HTML
+│   └── PatientSettings.tsx          # Patient settings form (rename, overrides, delete)
 ├── lib/
 │   └── api.ts                       # All API calls to FastAPI backend
 ├── app/
@@ -99,7 +98,7 @@ Line height: 1.6 for body, 1.2 for headings.
 
 - 12-column desktop grid, 4-column mobile grid.
 - Sticky top navigation with patient context.
-- Card-based information hierarchy for the summary module.
+- Card-based information hierarchy for the chat and records panels.
 
 ---
 
@@ -130,30 +129,8 @@ Patient list view.
 
 ### Patient Page (`/patient/[id]`)
 
-Three-column layout:
-
-```
-┌────────────────────────────────────────────────────────────────────────────────┐
-│  OpenHealth v1                                                            ⚙   │
-└────────────────────────────────────────────────────────────────────────────────┘
-┌──────────────────┬──────────────────────────────────────┬──────────────────────┐
-│  Left Sidebar    │  Main — Chat                         │  Right Sidebar       │
-│──────────────────│──────────────────────────────────────│──────────────────────│
-│ Patients         │  "Medication review"  [rename]       │  Summary             │
-│  ▸ Mom      ⚙   │  ─────────────────────────────────── │  ──────────────────  │
-│    Dad           │                                      │  [structured text]   │
-│    + Add Patient │  [message bubbles, scrollable]       │                      │
-│                  │                                      │                      │
-│ Chats            │                                      │                      │
-│  + New Chat      │                                      │                      │
-│  ───────────     │                                      │                      │
-│  ▸ Medication    │                                      │                      │
-│    review        │                                      │                      │
-│    Follow-up     │                                      │                      │
-│    questions     │                                      │                      │
-│                  │  [text input]             [Send]     │                      │
-└──────────────────┴──────────────────────────────────────┴──────────────────────┘
-```
+Two-column layout: a left sidebar (patient switcher + chat session list) and a main
+area that toggles between **Chat** and **Record Files** tabs. Both areas are detailed below.
 
 **Left sidebar**
 - Lists all patients; active patient highlighted.
@@ -171,9 +148,6 @@ Three-column layout:
 - Text input fixed at bottom. Send calls `POST /chat`.
 - If an ingestion job is active (`GET /patients/{id}/active-job` polling every 2s), show `IngestionProgress` above the chat input.
 
-**Right sidebar**
-- `SummaryPanel.tsx`: renders `GET /summary/{patient_id}` markdown string as HTML. **HTML must be sanitized before injection** (DOMPurify or equivalent). Summary uses `##` headers: Overview, Active Conditions, Current Medications, Recent Procedures, Key Concerns.
-
 ---
 
 ### Patient Settings Page (`/patient/[id]/settings`)
@@ -185,7 +159,6 @@ Contains:
 - **Rename patient** — text field pre-filled with current name. On save: `PATCH /patients/{id} { name }`. Folder slug is not changed.
 - **Memory threshold override** — number input for `memory_results_override` (per-patient number of past exchanges retrieved per turn). Blank/empty = use global config.
 - **Context window override** — number input for `context_window_tokens_override`. Blank/empty = use global config.
-- **Regenerate summary** — button calls `POST /summary/{patient_id}`. Show loading state while running. Display updated summary on completion.
 - **Delete patient** — button opens `DeletePatientModal.tsx` (same modal as home page delete flow — checkboxes for uploads, chats, record files, vector data, all defaulted to on).
 
 On save of rename/overrides: calls `PATCH /patients/{id}` with changed fields only.
@@ -246,13 +219,13 @@ Use these states for file upload feedback:
 - Clear distinction between facts vs interpretation.
 - Plain-English default.
 - Show uncertainty explicitly (e.g. "Possible medication change — please confirm").
-- Separate "Facts from source" and "AI interpretation" in summary views.
+- Separate "Facts from source" and "AI interpretation" in assistant responses.
 - Require user confirmation for ambiguous or destructive actions (delete modal).
 
 ---
 
 ## Trust and Safety
 
-- Summary markdown rendered as HTML must be **sanitized before injection** (use DOMPurify or equivalent server-safe sanitizer). Never use `dangerouslySetInnerHTML` with raw unsanitized content.
+- Assistant message markdown rendered as HTML must be **sanitized before injection** (use DOMPurify or equivalent server-safe sanitizer). Never use `dangerouslySetInnerHTML` with raw unsanitized content.
 - Do not use color alone to communicate risk or urgency — pair with text/icon.
 - Confidence/uncertainty shown with neutral UI, not alarmist color spikes.

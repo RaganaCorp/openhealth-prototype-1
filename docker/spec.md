@@ -83,7 +83,7 @@ Two installer scripts live in the project root. They perform pre-flight checks, 
 
 ### Model List Resolution
 
-Both installers derive the required Ollama models from `backend/config.defaults.json` at install time. They read the fields `chat_model`, `clinical_model`, `summary_model`, `verification_model`, and `embedding_model`, deduplicate, and use the resulting list for `ollama pull` calls.
+Both installers derive the required Ollama models from `backend/config.defaults.json` at install time. They read the fields `chat_model`, `clinical_model`, `verification_model`, and `embedding_model`, deduplicate, and use the resulting list for `ollama pull` calls.
 
 ### Windows — `install.ps1` (PowerShell)
 
@@ -175,7 +175,7 @@ All runtime data lives under `./data/` in the project root, bind-mounted into th
 │   └── {patient_id}_chat_{session_id}/  # semantic chat memory per session
 └── patients/
     └── mary-johnson/                    # auto-created from patient name slug
-        ├── patient.json                 # per-patient record (documents, summary, sessions, states)
+        ├── patient.json                 # per-patient record (documents, sessions, states)
         ├── patient.md                   # generated — full concatenated record
         ├── uploads/                     # source files (PDFs, TIFFs, TXTs, HTMLs, JSONs)
         │   ├── discharge_summary_jan2026.pdf

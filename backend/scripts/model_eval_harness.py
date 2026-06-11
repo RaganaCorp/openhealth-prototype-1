@@ -49,29 +49,6 @@ REQUESTED_MODELS = [
 
 # Ollama structured-output schemas for scenarios that require exact JSON structure.
 # Passed as the `format` field in /api/chat — Ollama constrains token sampling to match.
-_EXTRACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["demographics", "conditions", "medications", "procedures", "allergies", "key_labs", "concerns"],
-    "properties": {
-        "demographics": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["age", "sex"],
-            "properties": {
-                "age": {"type": ["string", "null"]},
-                "sex": {"type": ["string", "null"]},
-            },
-        },
-        "conditions":  {"type": "array", "maxItems": 25, "items": {"type": "string", "maxLength": 160}},
-        "medications": {"type": "array", "maxItems": 25, "items": {"type": "string", "maxLength": 160}},
-        "procedures":  {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 200}},
-        "allergies":   {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 160}},
-        "key_labs":    {"type": "array", "maxItems": 25, "items": {"type": "string", "maxLength": 160}},
-        "concerns":    {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 160}},
-    },
-}
-
 _VERIFICATION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["corrected_answer", "citations", "uncertainty_note"],
@@ -529,59 +506,6 @@ def _judge_candidate_output(
     return round(numeric, 2), rationale
 
 
-def _prepare_extraction_records(patient_context: str) -> str:
-    """Keep clinically dense sections and drop admin-heavy chatter for better JSON extraction."""
-    text = re.sub(r"\s+", " ", patient_context)
-
-    priority_markers = [
-        "top Reason for Referral",
-        "top Assessments",
-        "top Problems",
-        "top Medications",
-        "top Procedures",
-        "top Results",
-        "top Allergies and Adverse Reactions",
-        "Vital Signs",
-    ]
-
-    chunks: list[str] = []
-    for marker in priority_markers:
-        pattern = re.compile(
-            rf"({re.escape(marker)}.*?)(?=top [A-Za-z]|DOCUMENT:|\Z)",
-            re.IGNORECASE,
-        )
-        m = pattern.search(text)
-        if m:
-            chunks.append(m.group(1).strip())
-
-    if not chunks:
-        base = patient_context
-    else:
-        base = "\n\n".join(chunks)
-
-    # Remove repeated provider/footer noise that encourages loops.
-    base = re.sub(r"\bStaley, MA Ese\b", "", base, flags=re.IGNORECASE)
-    base = re.sub(r"\bPrognosis:\s*", "", base, flags=re.IGNORECASE)
-    base = re.sub(r"\s+", " ", base).strip()
-
-    # De-duplicate repeated sentence fragments while preserving first occurrence.
-    seen: set[str] = set()
-    parts: list[str] = []
-    for frag in re.split(r"(?<=[.;])\s+", base):
-        norm = frag.strip()
-        if not norm:
-            continue
-        key = norm.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        parts.append(norm)
-
-    reduced = " ".join(parts)
-    # Keep extraction prompts comfortably below Ollama's 4096-token prompt limit.
-    return reduced[:4500]
-
-
 def _prepare_verification_context(patient_context: str) -> str:
     """Reduce noisy chart text while preserving evidence-rich sections for grounding checks."""
     text = re.sub(r"\s+", " ", patient_context)
@@ -612,49 +536,7 @@ def _prepare_verification_context(patient_context: str) -> str:
     return reduced[:9000]
 
 
-def _is_valid_extraction_json(output: str) -> bool:
-    parsed = parse_json_response(output)
-    if not isinstance(parsed, dict):
-        return False
-
-    required = [
-        "demographics",
-        "conditions",
-        "medications",
-        "procedures",
-        "allergies",
-        "key_labs",
-        "concerns",
-    ]
-    if any(key not in parsed for key in required):
-        return False
-
-    if not isinstance(parsed.get("demographics"), dict):
-        return False
-    list_fields = ["conditions", "medications", "procedures", "allergies", "key_labs", "concerns"]
-    return all(isinstance(parsed.get(field), list) for field in list_fields)
-
-
 def build_scenarios(patient_context: str, json_source: str) -> list[dict[str, Any]]:
-    structured_data = (
-        "**Patient demographics**: age unknown, sex unknown\n\n"
-        "**Known Conditions**:\n"
-        "- Hypertension\n"
-        "- Type 2 diabetes\n\n"
-        "**Current Medications**:\n"
-        "- Metformin 500 mg BID\n"
-        "- Lisinopril 10 mg daily\n\n"
-        "**Recent Procedures / Visits**:\n"
-        "- Emergency department visit for chest pain\n\n"
-        "**Allergies**:\n"
-        "- No known drug allergies\n\n"
-        "**Key Lab Results**:\n"
-        "- HbA1c: 7.8\n\n"
-        "**Clinical Concerns**:\n"
-        "- Poor glycemic control"
-    )
-
-    extraction_records = _prepare_extraction_records(patient_context)
     verification_context = _prepare_verification_context(patient_context)
 
     scenarios: list[dict[str, Any]] = [
@@ -672,32 +554,6 @@ def build_scenarios(patient_context: str, json_source: str) -> list[dict[str, An
                 }
             ],
             "validator": lambda output: isinstance(parse_json_response(output), dict),
-        },
-        {
-            "name": "summary_generation",
-            "messages": tl.build_summary_messages(structured_data),
-            "validator": lambda output: all(
-                header in output
-                for header in [
-                    "## Overview",
-                    "## Active Conditions",
-                    "## Current Medications",
-                    "## Recent Procedures",
-                    "## Key Concerns",
-                ]
-            ),
-        },
-        {
-            "name": "extraction_pass1",
-            "output_format": _EXTRACTION_SCHEMA,
-            "options": {"temperature": 0, "num_predict": 700},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": tl.build_extraction_pass1_prompt(extraction_records),
-                }
-            ],
-            "validator": _is_valid_extraction_json,
         },
         {
             "name": "json_document_extraction",

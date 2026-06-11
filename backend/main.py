@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import ai
-import documents as docs_module
 import jobs
 import memory
 import patients as pt
@@ -168,7 +167,6 @@ class ChatRequest(BaseModel):
 class ConfigUpdateRequest(BaseModel):
     chat_model: Optional[str] = None
     clinical_model: Optional[str] = None
-    summary_model: Optional[str] = None
     verification_model: Optional[str] = None
     embedding_model: Optional[str] = None
     embed_timeout_seconds: Optional[float] = None
@@ -184,23 +182,6 @@ class ConfigUpdateRequest(BaseModel):
     medgemma_verification_enabled: Optional[bool] = None
     grounding_enabled: Optional[bool] = None
     grounding_max_retries: Optional[int] = None
-
-
-class SummaryOverridesRequest(BaseModel):
-    active_conditions: str = ""
-    current_medications: str = ""
-    recent_procedures: str = ""
-    key_concerns: str = ""
-
-
-def _normalize_summary_overrides(raw: Optional[dict]) -> dict:
-    src = raw or {}
-    return {
-        "active_conditions": str(src.get("active_conditions", "") or ""),
-        "current_medications": str(src.get("current_medications", "") or ""),
-        "recent_procedures": str(src.get("recent_procedures", "") or ""),
-        "key_concerns": str(src.get("key_concerns", "") or ""),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -415,66 +396,6 @@ async def delete_document(patient_id: str, document_id: str):
 @app.get("/patients/{patient_id}/active-job")
 async def active_job(patient_id: str):
     return jobs.get_active_job(patient_id)
-
-
-# ---------------------------------------------------------------------------
-# Summary & Timeline
-# ---------------------------------------------------------------------------
-
-@app.get("/summary/{patient_id}")
-async def get_summary(patient_id: str):
-    record = await pt.load_patient_record(patient_id)
-    if record is None:
-        raise _http_404("Patient not found")
-    return {"summary": record.get("summary", "")}
-
-
-@app.get("/summary-overrides/{patient_id}")
-async def get_summary_overrides(patient_id: str):
-    record = await pt.load_patient_record(patient_id)
-    if record is None:
-        raise _http_404("Patient not found")
-    return _normalize_summary_overrides(record.get("summary_overrides"))
-
-
-@app.post("/summary-overrides/{patient_id}")
-async def update_summary_overrides(patient_id: str, body: SummaryOverridesRequest):
-    entry = await pt.find_patient_by_id(patient_id)
-    if entry is None:
-        raise _http_404("Patient not found")
-
-    record = await pt.load_patient_record(patient_id)
-    if record is None:
-        raise _http_404("Patient not found")
-
-    overrides = _normalize_summary_overrides(body.model_dump())
-    await pt.mutate_patient_record(
-        patient_id, lambda r: r.__setitem__("summary_overrides", overrides)
-    )
-
-    patient_folder = Path(entry["folder_path"])
-    # Serialise with ingestion jobs, which rebuild patient.md under the same lock.
-    async with pt.record_lock(patient_id):
-        await asyncio.to_thread(docs_module.upsert_summary_overrides_section, patient_folder, overrides)
-    return overrides
-
-
-@app.post("/summary/{patient_id}")
-async def regenerate_summary(patient_id: str):
-    entry = await pt.find_patient_by_id(patient_id)
-    if entry is None:
-        raise _http_404("Patient not found")
-
-    patient_md = await asyncio.to_thread(docs_module.read_patient_md, Path(entry["folder_path"]))
-
-    record = await pt.load_patient_record(patient_id)
-    overrides = None if record is None else record.get("summary_overrides")
-    cfg = load_config()
-    summary = await tl.generate_summary(patient_md, overrides, model=cfg.summary_model)
-
-    await pt.mutate_patient_record(patient_id, lambda r: r.__setitem__("summary", summary))
-
-    return {"summary": summary}
 
 
 # ---------------------------------------------------------------------------
@@ -693,24 +614,19 @@ async def chat(body: ChatRequest):
         )
 
         # 5. Assemble prompt.
-        # Patient data (summary + records) goes in the SYSTEM message so that
-        # small instruction-tuned models treat it as pre-loaded background
-        # knowledge rather than something the user is asking them to process.
-        # Only the conversational elements (state, history, question) go in
-        # the USER turn.
-        patient_summary = (record.get("summary") or "").strip()
-
+        # Patient records go in the SYSTEM message so that small instruction-tuned
+        # models treat them as pre-loaded background knowledge rather than something
+        # the user is asking them to process. Only the conversational elements
+        # (state, history, question) go in the USER turn.
         system_parts = [
             "You are OpenHealth, a knowledgeable and compassionate medical AI assistant.\n"
-            "The patient's medical record and a synthesised summary are provided below.\n"
-            "Use both to ground your responses — interpret, explain, and connect information across them.\n"
+            "The patient's medical record is provided below.\n"
+            "Use it to ground your responses — interpret, explain, and connect information across the records.\n"
             "When referencing specific information, cite the source document.\n"
             "Be direct, warm, and clear. Write in paragraphs, not bullet points.\n"
             "You are not limited to only what is in the documents — use your medical knowledge\n"
             "to help the user understand, interpret, and act on what the records contain."
         ]
-        if patient_summary:
-            system_parts.append(f"\n\n--- PATIENT SUMMARY (generated, may include caregiver corrections) ---\n{patient_summary}")
         if patient_context:
             system_parts.append(f"\n\n--- PATIENT RECORDS ---\n{patient_context}")
 

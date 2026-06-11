@@ -42,7 +42,6 @@ def _load_default_values() -> dict[str, Any]:
 class Config(BaseModel):
     chat_model: str
     clinical_model: str
-    summary_model: str
     verification_model: str
     embedding_model: str
     embed_timeout_seconds: float

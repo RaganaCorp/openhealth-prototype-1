@@ -15,7 +15,6 @@
 │                                                 │
 │  POST /ingest/{id}  →  Background job           │
 │  POST /chat         →  turn assembly + Ollama   │
-│  GET  /summary      →  patients/{slug}/patient.json │
 └──────────┬──────────────────────┬───────────────┘
            │                      │
 ┌──────────▼──────┐    ┌──────────▼───────────────┐
@@ -84,18 +83,7 @@ PDFs / TIFFs / TXTs / HTMLs
         │
         ▼
   write_patient.md  (all docs concatenated with document boundaries)
-        │
-        └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
-                                           ├── Pass 1: structured extraction
-                                           │   (conditions / medications / procedures / labs → JSON)
-                                           ├── Deterministic fallback merge
-                                           │   (regex-based section extraction from patient.md
-                                           │    merged with pass-1 results; used when pass-1 sparse)
-                                           └── Pass 2: prose generation from pre-extracted facts
-                                               (fallback: inject pass-1 items directly if LLM drops a section)
 ```
-
-**Summary generation — two-pass approach**: because patient records arrive in wildly different formats (CCD exports, portal HTML, PDFs, JSON), deterministic extraction is not reliable across all formats. Summary generation therefore uses two LLM calls. **Pass 1** sends the full `patient.md` (up to 30,000 characters) to the LLM with a strict extraction-only prompt and receives a JSON object containing conditions, medications, procedures, key labs, and demographics. After pass-1, a deterministic fallback extracts section blobs from `patient.md` by regex-matching common section headers (e.g. "Active Problems", "Medications", "Procedures") and parses list items as a safety net. The pass-1 LLM output and the deterministic fallback are then merged (LLM results take precedence; deterministic fills any empty arrays). **Pass 2** formats those extracted facts as explicit pre-verified bullet lists and sends them to the LLM for prose generation. If the LLM drops a section in Pass 2 that had items in the merged structured data, those items are injected directly as a fallback, bypassing the LLM for that section.
 
 Ingestion runs as a background job. Frontend polls `/status/{job_id}` every 2 seconds and displays live progress.
 
@@ -103,7 +91,7 @@ Ingestion is triggered automatically after file upload completes (incremental). 
 
 **Incremental ingestion** (default for upload and watcher): only files not yet recorded in `patient.json` or files detected as changed are processed. Change detection uses file modification timestamp and file size (`mtime`, `size`) tracked per document record. `patient.md` is appended/updated for those files and only corresponding chunks are upserted in the `_docs` ChromaDB collection. Existing chat history is untouched.
 
-**Full rebuild** (`POST /rebuild/{patient_id}`): clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. The summary is also regenerated. Chat history in `_chat` is never cleared on any rebuild. This is exposed in the UI as a "Rebuild from scratch" action for cases where document order or extraction quality needs to be reset.
+**Full rebuild** (`POST /rebuild/{patient_id}`): clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. Chat history in `_chat` is never cleared on any rebuild. This is exposed in the UI as a "Rebuild from scratch" action for cases where document order or extraction quality needs to be reset.
 
 **File scan rules**: uploaded files are stored in the `uploads/` subfolder of each patient folder. Ingestion scans only the top level of `uploads/` — subdirectories within it are ignored. The only exclusion applied is `*.extracted` files (they are cached extraction outputs, not source documents). All other files matching supported extensions (`.pdf`, `.tif`, `.tiff`, `.txt`, `.html`, `.json`) are processed. App-generated files (`patient.json`, `patient.md`) live outside `uploads/` in the patient root and are never scanned.
 
@@ -239,7 +227,6 @@ ChromaDB serves two distinct purposes:
   "last_ingested_at": "ISO timestamp",
   "document_count": 12,
   "documents": [],
-  "summary": "string",
   "chat_sessions": [],
   "conversation_states": {},
   "memory_results_override": null,
@@ -340,7 +327,7 @@ This flat ordered log is the source of truth for rendering chat history in the U
 - `GET /patients` — list all patients
 - `POST /patients` — create patient `{ name }`. Backend slugifies name, creates folder, returns `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }` (same thin shape as `GET /patients/{id}`).
 - `POST /patients/{id}/upload` — upload one or more files (multipart/form-data). Files are written to `./data/patients/{slug}/uploads/`. Returns `{ filenames[], job_id }`. Triggers ingestion automatically upon completion; `job_id` can be used immediately to poll `/status/{job_id}`.
-- `GET /patients/{id}` — get thin patient detail only: `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }`. Summary, chat sessions, and messages are fetched from their dedicated endpoints.
+- `GET /patients/{id}` — get thin patient detail only: `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }`. Chat sessions and messages are fetched from their dedicated endpoints.
 - `PATCH /patients/{id}` — update patient fields. Accepts any subset of `{ name, memory_results_override, context_window_tokens_override }`. Renaming updates the `patients.json` index entry name; the folder slug is never changed. Returns the updated thin patient shape.
 - `DELETE /patients/{id}` — remove a patient from the list. The frontend shows a confirmation modal with checkboxes (all defaulted to on) before calling this endpoint:
   - Remove uploaded source files (`uploads/` folder)
@@ -358,10 +345,6 @@ This flat ordered log is the source of truth for rendering chat history in the U
 - `GET /documents/{patient_id}` — list all ingested documents
 - `DELETE /documents/{patient_id}/{document_id}` — delete one uploaded document by ID, remove its cached `.extracted` sidecar, and trigger a rebuild. Returns `{ job_id }`.
 - `GET /patients/{id}/active-job` — returns the currently running ingestion job for a patient (or `null`). Used by the frontend to discover watcher-triggered jobs and display progress without a client-initiated `job_id`.
-
-### Summary
-- `GET /summary/{patient_id}` — return stored summary as `{ "summary": "markdown string" }`
-- `POST /summary/{patient_id}` — regenerate summary, returns `{ "summary": "markdown string" }`
 
 ### Chat
 - `POST /chat`
@@ -422,7 +405,7 @@ openhealth/
 │   ├── main.py         # FastAPI routes
 │   ├── memory.py       # ChromaDB wrapper (doc chunks + chat history collections)
 │   ├── patients.py     # JSON persistence for patient index, patient.json, chat message logs
-│   ├── timeline.py     # LLM calls: summary generation, grounding/citation verification, conversation-state updates, session-title generation, query classification
+│   ├── timeline.py     # LLM calls: grounding/citation verification, conversation-state updates, session-title generation, query classification
 │   ├── watcher.py      # watchdog-based watcher; monitors uploads/ subfolder per patient; surfaces jobs via /status/{job_id}
 │   ├── Dockerfile
 │   └── requirements.txt  # includes: fastapi, uvicorn, pymupdf, pytesseract, chromadb, watchdog
@@ -442,8 +425,7 @@ openhealth/
 │   │   ├── Citation.tsx
 │   │   ├── DeletePatientModal.tsx  # confirmation modal with per-item checkboxes before delete
 │   │   ├── IngestionProgress.tsx
-│   │   ├── PatientSettings.tsx   # patient settings form (rename, overrides, document upload/delete, delete patient)
-│   │   └── SummaryPanel.tsx      # renders summary markdown string as HTML
+│   │   └── PatientSettings.tsx   # patient settings form (rename, overrides, document upload/delete, delete patient)
 │   ├── lib/
 │   │   └── api.ts
 │   ├── Dockerfile
@@ -511,7 +493,7 @@ All runtime data lives under `./data/` in the project root, which is bind-mounte
 │   └── {patient_id}_chat_{session_id}/  # semantic chat memory per session
 └── patients/
     └── mary-johnson/                    # auto-created from patient name slug
-        ├── patient.json                 # per-patient data: documents, summary, sessions, states
+        ├── patient.json                 # per-patient data: documents, sessions, states
         ├── patient.md                   # generated — full concatenated record
         ├── uploads/                     # source files uploaded via UI or placed manually
         │   ├── discharge_summary_jan2026.pdf
@@ -534,7 +516,6 @@ Config is stored at `./data/config/config.json` (inside the mounted volume). It 
 {
   "chat_model": "gemma4:e2b",
   "clinical_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
-  "summary_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
   "verification_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
   "embedding_model": "nomic-embed-text",
   "embed_timeout_seconds": 60.0,
@@ -644,51 +625,6 @@ Return:
 Do not add new clinical facts that are not in evidence.
 ```
 
-### Summary generation — Pass 1 (extraction)
-```
-You are a clinical data extractor. Extract structured information from the following
-medical records. Return ONLY valid JSON in this exact format — no prose, no explanation:
-
-{
-  "demographics": { "age": "", "sex": "", "dob": "" },
-  "conditions": ["..."],
-  "medications": ["..."],
-  "procedures": ["..."],
-  "key_labs": ["..."],
-  "allergies": ["..."]
-}
-
-Rules:
-- Extract only information that is explicitly stated in the records.
-- Do not invent or infer. Leave arrays empty if nothing is found.
-- Medications: include drug name and dosage if present.
-- Labs: include test name and value/date if present.
-- Conditions: use the clinical terminology from the records.
-```
-
-### Summary generation — Pass 2 (prose)
-```
-You are a medical summarization assistant. Be precise and factual.
-The following pre-extracted clinical facts have been verified from the patient's records.
-Use them to produce a markdown-formatted summary using the exact section headers below.
-Do not invent facts not present in the provided data. Keep each section concise.
-
-## Overview
-3-4 sentences summarizing the patient's overall medical picture based on the facts below.
-
-## Active Conditions
-[pre-extracted conditions list injected here]
-
-## Current Medications
-[pre-extracted medications list injected here]
-
-## Recent Procedures
-[pre-extracted procedures list injected here]
-
-## Key Concerns
-Note patterns, gaps, or items that warrant attention based on the above facts.
-```
-
 ### JSON extraction
 ```
 You are a medical data extractor. You have been given the raw contents of a JSON file
@@ -717,7 +653,7 @@ unless they carry clinical meaning. Preserve all dates and values exactly as the
 12. **Message log for display** — ordered messages are written to `./data/patients/{slug}/chats/` on every turn and read back directly for UI rendering; ChromaDB is used only for semantic retrieval, not display.
 13. **No authentication** — local single-user app; no login required.
 14. **Optimistic chat send** — when the user sends a message, it is displayed immediately with a "Sending..." status indicator. On success the message is replaced by the server-confirmed exchange. On failure the message remains visible with a "Failed to send. Please retry." notice rather than disappearing; the error is also logged to the browser console.
-15. **Markdown rendering in chat** — assistant responses are rendered as sanitized HTML using `marked` + `DOMPurify` with the `.markdown-body` stylesheet. User messages remain plain text. This mirrors the rendering behavior of the Summary panel.
+15. **Markdown rendering in chat** — assistant responses are rendered as sanitized HTML using `marked` + `DOMPurify` with the `.markdown-body` stylesheet. User messages remain plain text.
 16. **Backend observability** — every LLM call logs the full request payload and response to the `uvicorn.error` logger. Transport and HTTP errors log status codes and response bodies. The `/chat` endpoint logs lifecycle events (request received, context prepared, response sent) and catches all unhandled exceptions for structured logging.
 
 ---
@@ -751,32 +687,11 @@ Changes take effect immediately on save. The modal closes on save or on click-ou
 
 ### Patient Page
 
-```
-┌────────────────────────────────────────────────────────────────────────────────┐
-│  OpenHealth v1                                                            ⚙   │
-└────────────────────────────────────────────────────────────────────────────────┘
-┌──────────────────┬──────────────────────────────────────┬──────────────────────┐
-│  Left Sidebar    │  Main — Chat                         │  Right Sidebar       │
-│──────────────────│──────────────────────────────────────│──────────────────────│
-│ Patients         │  "Medication review"  [rename]       │  Summary             │
-│  ▸ Mom      ←    │  ─────────────────────────────────── │  ──────────────────  │
-│    Dad           │                                      │  [structured text]   │
-│    + Add Patient │  [message bubbles, scrollable]       │                      │
-│                  │                                      │                      │
-│ Chats            │                                      │                      │
-│  + New Chat      │                                      │                      │
-│  ───────────     │                                      │                      │
-│  ▸ Medication    │                                      │                      │
-│    review        │                                      │                      │
-│    Follow-up     │                                      │                      │
-│    questions     │                                      │                      │
-│                  │  [text input]             [Send]     │                      │
-└──────────────────┴──────────────────────────────────────┴──────────────────────┘
-```
+Two-column layout: a left sidebar (patient switcher + chat session list) and a main
+area that toggles between **Chat** and **Record Files** tabs.
 
 - **Left sidebar**: patient selector (all patients listed, active highlighted) followed by the chat/session list for the selected patient. "New Chat" button at the top of the list. A settings icon next to the active patient name links to `/patient/[id]/settings`.
-- **Main area**: active chat session. Shows session title with inline rename on click. Message bubbles for user and assistant. Citations rendered below each assistant message. Text input fixed at the bottom.
-- **Right sidebar**: summary rendered as markdown-to-HTML in a scrollable panel (`SummaryPanel.tsx`). The summary LLM output uses `##` markdown headers for each section — Overview, Active Conditions, Medications, Recent Procedures, Key Concerns. Frontend converts the stored markdown string to HTML for display and must sanitize the rendered HTML before injection.
+- **Main area**: tabs for the active chat session and the patient's record files. The chat view shows the session title with inline rename on click, message bubbles for user and assistant, citations rendered below each assistant message, and a text input fixed at the bottom.
 
 ### Home Page
 
@@ -881,6 +796,6 @@ Core component states:
 - Respect `prefers-reduced-motion`
 
 ## Trust and Safety UI Cues
-- Separate "Facts from source" and "AI interpretation" in all summary views
+- Separate "Facts from source" and "AI interpretation" in assistant responses
 - Show uncertainty explicitly (e.g., "Possible medication change - please confirm")
 - Require user confirmation for ambiguous medication matches and multi-date selection

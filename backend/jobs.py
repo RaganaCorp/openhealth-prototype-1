@@ -373,9 +373,9 @@ async def start_full_rebuild(patient_id: str) -> dict:
 
 
 async def start_document_deletion(patient_id: str, document_id: str) -> Optional[dict]:
-    """Incrementally delete one document: remove its files and vector chunks,
-    rebuild patient.md from the remaining documents, and regenerate the summary —
-    without re-extracting or re-embedding the rest of the record.
+    """Incrementally delete one document: remove its files and vector chunks and
+    rebuild patient.md from the remaining documents — without re-extracting or
+    re-embedding the rest of the record.
 
     Returns None if a job is already running for this patient (the caller should
     surface a conflict); the deletion targets a specific document and cannot be
@@ -443,43 +443,17 @@ async def _run_incremental(
             job["processed"] += 1
 
         # Rebuild patient.md from all documents, under the per-patient lock so
-        # a concurrent summary-overrides edit can't interleave with the rebuild.
-        # Overrides are re-read fresh inside the lock so an edit made while files
-        # were processing isn't reverted by this job's stale record snapshot.
+        # a concurrent record edit can't interleave with the rebuild.
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         all_doc_records = list(updated_docs.values())
         async with pt.record_lock(patient_id):
             await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
-            fresh_record = await asyncio.to_thread(pt._load_patient_record_sync, folder_slug)
-            overrides = (fresh_record or record).get("summary_overrides")
-            await asyncio.to_thread(
-                docs_module.upsert_summary_overrides_section,
-                patient_folder,
-                overrides,
-            )
 
-        # Update patient.json. Compute owned fields first, then persist only
-        # those via mutate_patient_record so a concurrent chat write (e.g.
-        # conversation_states) on the same record is not clobbered.
-        patient_md_text = await asyncio.to_thread(
-            docs_module.read_patient_md, patient_folder
-        )
-
-        new_summary: Optional[str] = None
-        # Regenerate the summary only if files were processed.
-        if files_to_process:
-            _set_phase(job, "generating_summary", "summary")
-            cfg = load_config()
-            new_summary = await tl.generate_summary(
-                patient_md_text,
-                overrides,
-                model=cfg.summary_model,
-            )
-
+        # Update patient.json. Persist only owned fields via mutate_patient_record
+        # so a concurrent chat write (e.g. conversation_states) on the same record
+        # is not clobbered.
         def _apply(r: dict) -> None:
             r["documents"] = all_doc_records
-            if new_summary is not None:
-                r["summary"] = new_summary
 
         _set_phase(job, "saving", "patient.json")
         await pt.mutate_patient_record(patient_id, _apply)
@@ -534,29 +508,9 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         async with pt.record_lock(patient_id):
             await asyncio.to_thread(_rebuild_patient_md, patient_folder, new_docs)
-            fresh_record = await asyncio.to_thread(pt._load_patient_record_sync, folder_slug)
-            overrides = (fresh_record or record).get("summary_overrides")
-            await asyncio.to_thread(
-                docs_module.upsert_summary_overrides_section,
-                patient_folder,
-                overrides,
-            )
-
-        patient_md_text = await asyncio.to_thread(
-            docs_module.read_patient_md, patient_folder
-        )
-
-        _set_phase(job, "generating_summary", "summary")
-        cfg = load_config()
-        new_summary = await tl.generate_summary(
-            patient_md_text,
-            overrides,
-            model=cfg.summary_model,
-        )
 
         def _apply(r: dict) -> None:
             r["documents"] = new_docs
-            r["summary"] = new_summary
 
         _set_phase(job, "saving", "patient.json")
         await pt.mutate_patient_record(patient_id, _apply)
@@ -611,33 +565,9 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
         _set_phase(job, "rebuilding_patient_md", "patient.md")
         async with pt.record_lock(patient_id):
             await asyncio.to_thread(_rebuild_patient_md, patient_folder, remaining)
-            fresh_record = await asyncio.to_thread(
-                pt._load_patient_record_sync, entry["folder_slug"]
-            )
-            overrides = (fresh_record or record).get("summary_overrides")
-            await asyncio.to_thread(
-                docs_module.upsert_summary_overrides_section,
-                patient_folder,
-                overrides,
-            )
-
-        # 4. Regenerate the summary so it no longer reflects the removed document.
-        new_summary = ""
-        if remaining:
-            patient_md_text = await asyncio.to_thread(
-                docs_module.read_patient_md, patient_folder
-            )
-            _set_phase(job, "generating_summary", "summary")
-            cfg = load_config()
-            new_summary = await tl.generate_summary(
-                patient_md_text,
-                overrides,
-                model=cfg.summary_model,
-            )
 
         def _apply(r: dict) -> None:
             r["documents"] = remaining
-            r["summary"] = new_summary
 
         _set_phase(job, "saving", "patient.json")
         await pt.mutate_patient_record(patient_id, _apply)

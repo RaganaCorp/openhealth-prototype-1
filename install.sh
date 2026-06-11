@@ -81,7 +81,7 @@ import json, sys
 with open("backend/config.defaults.json") as f:
     c = json.load(f)
 seen = set()
-for key in ["chat_model", "clinical_model", "summary_model", "verification_model", "embedding_model"]:
+for key in ["chat_model", "clinical_model", "verification_model", "embedding_model"]:
     v = c.get(key)
     if v and v not in seen:
         seen.add(v)

@@ -152,7 +152,6 @@ async def ensure_ollama_available() -> None:
     required_models = {
         cfg.chat_model,
         cfg.clinical_model,
-        cfg.summary_model,
         cfg.verification_model,
         cfg.embedding_model,
     }

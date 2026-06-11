@@ -190,15 +190,8 @@ async def create_patient(name: str) -> dict:
         "last_ingested_at": None,
         "document_count": 0,
         "documents": [],
-        "summary": "",
         "chat_sessions": [],
         "conversation_states": {},
-        "summary_overrides": {
-            "active_conditions": "",
-            "current_medications": "",
-            "recent_procedures": "",
-            "key_concerns": "",
-        },
         "memory_results_override": None,
         "context_window_tokens_override": None,
     }
