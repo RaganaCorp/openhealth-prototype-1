@@ -21,6 +21,12 @@ export function UploadArea({ patientId, onUploaded }: UploadAreaProps) {
       setError(null);
       const result = await uploadFiles(patientId, selectedFiles);
       onUploaded(result.job_id);
+      // Clear the selection so the list doesn't linger past a submitted batch,
+      // and reset the native input so re-selecting the same file fires onChange.
+      setFiles([]);
+      if (inputRef.current) {
+        inputRef.current.value = "";
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not upload files");
     } finally {

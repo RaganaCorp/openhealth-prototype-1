@@ -176,7 +176,7 @@ All runtime data lives under `./data/` in the project root, bind-mounted into th
 │   └── {patient_id}_chat_{session_id}/  # semantic chat memory per session
 └── patients/
     └── mary-johnson/                    # auto-created from patient name slug
-        ├── patient.json                 # per-patient record (documents, timeline, summary, sessions, states)
+        ├── patient.json                 # per-patient record (documents, summary, sessions, states)
         ├── patient.md                   # generated — full concatenated record
         ├── uploads/                     # source files (PDFs, TIFFs, TXTs, HTMLs, JSONs)
         │   ├── discharge_summary_jan2026.pdf

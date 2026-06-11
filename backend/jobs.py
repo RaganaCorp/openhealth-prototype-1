@@ -45,6 +45,17 @@ def get_job(job_id: str) -> Optional[dict]:
     return _jobs.get(job_id)
 
 
+def discard_patient_jobs(patient_id: str) -> None:
+    """Forget a deleted patient's in-memory job bookkeeping (pending followup,
+    active-job pointer, and finished job records) so these tables don't grow
+    without bound across patient create/delete cycles."""
+    _patient_pending.pop(patient_id, None)
+    _patient_active.pop(patient_id, None)
+    stale = [jid for jid, job in _jobs.items() if job.get("patient_id") == patient_id]
+    for jid in stale:
+        _jobs.pop(jid, None)
+
+
 def get_active_job(patient_id: str) -> Optional[dict]:
     job_id = _patient_active.get(patient_id)
     if not job_id:
@@ -132,6 +143,11 @@ async def _embed_and_upsert_chunks(
     """Chunk text, embed the chunks concurrently, upsert into the ChromaDB _docs collection."""
     cfg = load_config()
     chunks = docs_module.chunk_text(text, cfg.chunk_size, cfg.chunk_overlap)
+
+    # Re-extraction can yield fewer chunks than before; upsert alone would leave
+    # the old tail chunks (stale medical content) retrievable forever. Clear this
+    # document's chunks first (no-op for new documents).
+    await memory.delete_doc_chunks(patient_id, doc_record["id"])
     if not chunks:
         return
 
@@ -213,6 +229,12 @@ async def _process_file(
     extracted_path = file_path.with_suffix(file_path.suffix + ".extracted")
     llm_json_fn = await _make_llm_json_fn()
 
+    # Stat BEFORE extraction. If the file is still being copied in while we
+    # extract (the watcher fires on creation), recording the pre-extraction
+    # size/mtime means the next scan sees it as changed and re-extracts —
+    # stat'ing afterwards would permanently freeze the truncated extraction.
+    pre_stat = await asyncio.to_thread(file_path.stat)
+
     # Determine if we need to re-extract.
     if is_rebuild or (existing_doc and _file_changed(file_path, existing_doc)):
         text = await asyncio.to_thread(
@@ -243,8 +265,8 @@ async def _process_file(
         "date_detected": date_detected or "unknown",
         "document_type": doc_type,
         "ingested_at": _now(),
-        "mtime": os.path.getmtime(file_path),
-        "size": os.path.getsize(file_path),
+        "mtime": pre_stat.st_mtime,
+        "size": pre_stat.st_size,
     })
 
     await _embed_and_upsert_chunks(patient_id, doc_record, text)

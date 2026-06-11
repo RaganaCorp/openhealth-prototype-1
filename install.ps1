@@ -16,13 +16,56 @@ function Test-Command($name) {
     return $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
+# Wait up to 30 seconds for Ollama to respond on localhost:11434
+function Wait-ForOllama {
+    $waited = 0
+    Write-Host "Waiting for Ollama to be ready" -NoNewline
+    while ($waited -lt 30) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://localhost:11434" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            Write-Host ""
+            return $true
+        } catch {
+            Write-Host "." -NoNewline
+        }
+        Start-Sleep -Seconds 2
+        $waited += 2
+    }
+    Write-Host ""
+    return $false
+}
+
+# Ensure the Ollama server is running before pulling models (a fresh install
+# does not start it automatically).
+function Start-OllamaServer {
+    try {
+        $null = Invoke-WebRequest -Uri "http://localhost:11434" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Host "Starting Ollama service..." -ForegroundColor Cyan
+        Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
+        return (Wait-ForOllama)
+    }
+}
+
+# Models that fail to pull are collected and reported at the end.
+$pullFailures = @()
+
 if (-not (Test-Command "docker")) {
     Write-Host "Docker Desktop is not installed." -ForegroundColor Yellow
     Write-Host "Docker Desktop is required to run OpenHealth."
     Write-Host ""
-    Write-Host "Please install Docker Desktop manually and re-run this installer:"
+    Write-Host "Please install Docker Desktop manually:"
     Write-Host "  https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
-    exit 1
+    Write-Host ""
+    $null = Read-Host "Press Enter after installing Docker Desktop (or Ctrl+C to cancel)"
+
+    if (-not (Test-Command "docker")) {
+        Write-Host ""
+        Write-Host "Docker CLI is still not available in this terminal." -ForegroundColor Yellow
+        Write-Host "Open a new terminal and re-run install.ps1 after Docker Desktop finishes installing."
+        exit 1
+    }
 }
 
 # -- 2. Check Docker daemon is running ----------------------------------------
@@ -63,12 +106,20 @@ if (Test-Command "ollama") {
     Write-Host "Copying compose configuration (host Ollama)..."
     Copy-Item "docker\docker-compose.windows-ollama-host.yml" "docker-compose.yml" -Force
 
+    if (-not (Start-OllamaServer)) {
+        Write-Host ""
+        Write-Host "Ollama is installed but its server did not respond on localhost:11434." -ForegroundColor Red
+        Write-Host "Start Ollama (e.g. from the Start menu) and re-run install.ps1."
+        exit 1
+    }
+
     Write-Host ""
     Write-Host "Pulling required AI models (this may take a while)..." -ForegroundColor Cyan
     foreach ($model in $models) {
         Write-Host ""
         Write-Host "  Pulling: $model" -ForegroundColor White
         ollama pull $model
+        if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
     }
 } else {
     Write-Host "Ollama is not installed." -ForegroundColor Yellow
@@ -93,6 +144,15 @@ if (Test-Command "ollama") {
                 exit 1
             }
             Write-Host "Ollama installed successfully." -ForegroundColor Green
+
+            # A fresh winget install does not start the Ollama server, and every
+            # "ollama pull" below would fail against an unreachable localhost:11434.
+            if (-not (Start-OllamaServer)) {
+                Write-Host ""
+                Write-Host "Ollama was installed but its server did not start." -ForegroundColor Red
+                Write-Host "Start Ollama from the Start menu, then re-run install.ps1."
+                exit 1
+            }
         } else {
             Write-Host ""
             Write-Host "winget is not available on this machine." -ForegroundColor Yellow
@@ -111,6 +171,7 @@ if (Test-Command "ollama") {
             Write-Host ""
             Write-Host "  Pulling: $model" -ForegroundColor White
             ollama pull $model
+            if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
         }
     } else {
         Write-Host ""
@@ -121,22 +182,13 @@ if (Test-Command "ollama") {
         Write-Host ""
         Write-Host "Starting Ollama container to pull models..." -ForegroundColor Cyan
         docker compose up -d ollama
-
-        # Wait up to 30 seconds for Ollama to be responsive
-        $ready = $false
-        $waited = 0
-        Write-Host "Waiting for Ollama to be ready" -NoNewline
-        while (-not $ready -and $waited -lt 30) {
-            Start-Sleep -Seconds 2
-            $waited += 2
-            try {
-                $null = Invoke-WebRequest -Uri "http://localhost:11434" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-                $ready = $true
-            } catch {
-                Write-Host "." -NoNewline
-            }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ""
+            Write-Host "Failed to start the Ollama container." -ForegroundColor Red
+            exit 1
         }
-        Write-Host ""
+
+        $ready = Wait-ForOllama
 
         if (-not $ready) {
             Write-Host ""
@@ -155,6 +207,7 @@ if (Test-Command "ollama") {
             Write-Host ""
             Write-Host "  Pulling: $model" -ForegroundColor White
             docker exec ollama ollama pull $model
+            if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
         }
 
         Write-Host ""
@@ -172,6 +225,21 @@ if (-not (Test-Path "data")) {
 }
 
 # -- 5. Done -------------------------------------------------------------------
+
+if ($pullFailures.Count -gt 0) {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "  Setup incomplete" -ForegroundColor Red
+    Write-Host "========================================"
+    Write-Host ""
+    Write-Host "The following models failed to download:" -ForegroundColor Yellow
+    foreach ($model in $pullFailures) {
+        Write-Host "  $model"
+    }
+    Write-Host ""
+    Write-Host "Re-run install.ps1 to retry, or pull them manually with 'ollama pull <model>'."
+    exit 1
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green

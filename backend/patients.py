@@ -42,6 +42,20 @@ def _record_lock(patient_id: str) -> asyncio.Lock:
     return lock
 
 
+def record_lock(patient_id: str) -> asyncio.Lock:
+    """Public accessor for the per-patient lock — also used by callers that
+    write patient.md, so file rebuilds and override edits serialise with each
+    other and with record mutations."""
+    return _record_lock(patient_id)
+
+
+def discard_record_lock(patient_id: str) -> None:
+    """Drop a deleted patient's lock so the table doesn't grow without bound.
+    Safe even if the lock is momentarily held: an in-flight holder keeps its own
+    reference, and a deleted patient has no further operations to serialise."""
+    _record_locks.pop(patient_id, None)
+
+
 def _atomic_write_json(path: Path, data: Any) -> None:
     """Write JSON via a unique temp file + atomic rename so readers never observe
     a partially-written file (removes the need to lock reads). A unique temp name
@@ -120,6 +134,19 @@ async def save_patients_index(index: list[dict]) -> None:
         await asyncio.to_thread(_save_index_sync, index)
 
 
+async def mutate_patients_index(mutator: Callable[[list[dict]], Any]) -> Any:
+    """Atomically load → mutate → save patients.json. Holding the lock across the
+    whole read-modify-write cycle prevents two concurrent writers (e.g. a rename
+    and a background job's ingestion-stats update) from losing each other's
+    changes. The mutator mutates the index list in place; its return value is
+    passed through."""
+    async with _index_lock:
+        index = await asyncio.to_thread(_load_index_sync)
+        result = mutator(index)
+        await asyncio.to_thread(_save_index_sync, index)
+        return result
+
+
 async def find_patient_by_id(patient_id: str) -> Optional[dict]:
     index = await load_patients_index()
     return next((p for p in index if p["id"] == patient_id), None)
@@ -187,42 +214,56 @@ async def create_patient(name: str) -> dict:
         "last_ingested_at": None,
         "created_at": now,
     }
-    index = await load_patients_index()
-    index.append(entry)
-    await save_patients_index(index)
+    await mutate_patients_index(lambda index: index.append(entry))
 
     return _thin_shape(entry)
 
 
 async def patch_patient(patient_id: str, updates: dict) -> Optional[dict]:
-    index = await load_patients_index()
-    entry = next((p for p in index if p["id"] == patient_id), None)
-    if entry is None:
+    # Apply the name update to the index atomically under the index lock.
+    matched: list[dict] = []
+
+    def _apply_index(index: list[dict]) -> None:
+        entry = next((p for p in index if p["id"] == patient_id), None)
+        if entry is None:
+            return
+        if "name" in updates:
+            entry["name"] = updates["name"]
+        matched.append(entry)
+
+    await mutate_patients_index(_apply_index)
+    if not matched:
         return None
+    entry = matched[0]
 
-    # Apply name update to index.
-    if "name" in updates:
-        entry["name"] = updates["name"]
-        await save_patients_index(index)
-
-    # Apply overrides to patient.json.
+    # Apply overrides (and name) to patient.json.
     override_fields = {"memory_results_override", "context_window_tokens_override"}
     record_updates = {k: v for k, v in updates.items() if k in override_fields}
     if "name" in updates:
         record_updates["name"] = updates["name"]
+    record: Optional[dict] = None
     if record_updates:
-        await mutate_patient_record(patient_id, lambda r: r.update(record_updates))
+        record = await mutate_patient_record(patient_id, lambda r: r.update(record_updates))
 
-    return _thin_shape(entry)
+    # Include the saved override values so the client sees the applied state.
+    shape = _thin_shape(entry)
+    if record is not None:
+        shape["memory_results_override"] = record.get("memory_results_override")
+        shape["context_window_tokens_override"] = record.get("context_window_tokens_override")
+    return shape
 
 
 async def delete_patient_index_entry(patient_id: str) -> Optional[dict]:
-    index = await load_patients_index()
-    entry = next((p for p in index if p["id"] == patient_id), None)
-    if entry is None:
-        return None
-    await save_patients_index([p for p in index if p["id"] != patient_id])
-    return entry
+    removed: list[dict] = []
+
+    def _apply(index: list[dict]) -> None:
+        entry = next((p for p in index if p["id"] == patient_id), None)
+        if entry is not None:
+            removed.append(entry)
+            index.remove(entry)
+
+    await mutate_patients_index(_apply)
+    return removed[0] if removed else None
 
 
 # ---------------------------------------------------------------------------
@@ -285,13 +326,15 @@ async def mutate_patient_record(
 async def update_ingestion_stats(patient_id: str, document_count: int) -> None:
     """Denormalize document_count and last_ingested_at into patients.json index."""
     now = datetime.now(timezone.utc).isoformat()
-    index = await load_patients_index()
-    for entry in index:
-        if entry["id"] == patient_id:
-            entry["document_count"] = document_count
-            entry["last_ingested_at"] = now
-            break
-    await save_patients_index(index)
+
+    def _apply_index(index: list[dict]) -> None:
+        for entry in index:
+            if entry["id"] == patient_id:
+                entry["document_count"] = document_count
+                entry["last_ingested_at"] = now
+                break
+
+    await mutate_patients_index(_apply_index)
 
     def _apply(record: dict) -> None:
         record["document_count"] = document_count

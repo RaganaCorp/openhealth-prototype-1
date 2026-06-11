@@ -15,16 +15,24 @@ export default function PatientSettingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     async function load() {
       try {
         const patientData = await getPatient(patientId);
-        setPatient(patientData);
+        if (!cancelled) {
+          setPatient(patientData);
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load patient settings");
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Could not load patient settings");
+        }
       }
     }
 
     void load();
+    return () => {
+      cancelled = true;
+    };
   }, [patientId]);
 
   if (error) {

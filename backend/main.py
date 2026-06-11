@@ -246,7 +246,9 @@ async def get_patient(patient_id: str):
 
 @app.patch("/patients/{patient_id}")
 async def patch_patient(patient_id: str, body: PatchPatientRequest):
-    updates = body.model_dump(exclude_none=True)
+    # exclude_unset (not exclude_none) so an override explicitly sent as null is
+    # applied (clears it), while fields the client omitted are left untouched.
+    updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=422, detail="No fields to update")
     result = await pt.patch_patient(patient_id, updates)
@@ -257,9 +259,19 @@ async def patch_patient(patient_id: str, body: PatchPatientRequest):
 
 @app.delete("/patients/{patient_id}", status_code=204)
 async def delete_patient(patient_id: str, body: DeletePatientRequest):
+    # Refuse while an ingestion job is running: the job would otherwise re-create
+    # the patient's ChromaDB collection (get_or_create) and re-upsert deleted PHI
+    # after the cleanup below has already run.
+    if jobs.get_active_job(patient_id) is not None:
+        raise _http_409("An ingestion job is running for this patient; wait for it to finish and retry.")
+
     entry = await pt.delete_patient_index_entry(patient_id)
     if entry is None:
         raise _http_404("Patient not found")
+
+    # Stop watching the uploads folder so a recreated same-slug patient doesn't
+    # stack duplicate watch handlers on the same path.
+    watcher.remove_patient_watch(patient_id)
 
     folder_path = Path(entry["folder_path"])
 
@@ -295,6 +307,10 @@ async def delete_patient(patient_id: str, body: DeletePatientRequest):
     # If all patient content has been removed, delete the now-empty folder.
     if body.delete_uploads and body.delete_chats and body.delete_record_files:
         await asyncio.to_thread(shutil.rmtree, folder_path, True)
+
+    # Drop the patient's in-memory bookkeeping so these tables don't accumulate.
+    pt.discard_record_lock(patient_id)
+    jobs.discard_patient_jobs(patient_id)
 
 
 # ---------------------------------------------------------------------------

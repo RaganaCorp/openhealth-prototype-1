@@ -36,8 +36,7 @@ frontend/
 │   ├── DeletePatientModal.tsx       # Confirmation modal with per-item checkboxes
 │   ├── IngestionProgress.tsx        # Job progress bar; polls /status/{job_id}
 │   ├── PatientSettings.tsx          # Patient settings form (rename, overrides, regenerate, delete)
-│   ├── SummaryPanel.tsx             # Renders summary markdown string as sanitized HTML
-│   └── Timeline.tsx                 # Vertical timeline display (read-only)
+│   └── SummaryPanel.tsx             # Renders summary markdown string as sanitized HTML
 ├── lib/
 │   └── api.ts                       # All API calls to FastAPI backend
 ├── app/
@@ -100,14 +99,13 @@ Line height: 1.6 for body, 1.2 for headings.
 
 - 12-column desktop grid, 4-column mobile grid.
 - Sticky top navigation with patient context.
-- Card-based information hierarchy for summary and timeline modules.
+- Card-based information hierarchy for the summary module.
 
 ---
 
 ## Motion and Interaction
 
 - Staggered card reveal on dashboard load (100–180ms offsets)
-- Smooth expand/collapse for timeline details
 - Gentle highlight transition for newly detected changes
 - Respect `prefers-reduced-motion`
 
@@ -145,14 +143,14 @@ Three-column layout:
 │  ▸ Mom      ⚙   │  ─────────────────────────────────── │  ──────────────────  │
 │    Dad           │                                      │  [structured text]   │
 │    + Add Patient │  [message bubbles, scrollable]       │                      │
-│                  │                                      │  Timeline            │
-│ Chats            │                                      │  ──────────────────  │
-│  + New Chat      │                                      │  ● 2026-01-15        │
-│  ───────────     │                                      │    Discharge         │
-│  ▸ Medication    │                                      │  ● 2026-03-04        │
-│    review        │                                      │    Lab results       │
-│    Follow-up     │                                      │  ● 2026-04-10        │
-│    questions     │                                      │    Cardiology appt   │
+│                  │                                      │                      │
+│ Chats            │                                      │                      │
+│  + New Chat      │                                      │                      │
+│  ───────────     │                                      │                      │
+│  ▸ Medication    │                                      │                      │
+│    review        │                                      │                      │
+│    Follow-up     │                                      │                      │
+│    questions     │                                      │                      │
 │                  │  [text input]             [Send]     │                      │
 └──────────────────┴──────────────────────────────────────┴──────────────────────┘
 ```
@@ -175,7 +173,6 @@ Three-column layout:
 
 **Right sidebar**
 - `SummaryPanel.tsx`: renders `GET /summary/{patient_id}` markdown string as HTML. **HTML must be sanitized before injection** (DOMPurify or equivalent). Summary uses `##` headers: Overview, Active Conditions, Current Medications, Recent Procedures, Key Concerns.
-- `Timeline.tsx`: renders `GET /timeline/{patient_id}` events, sorted oldest-to-newest top-to-bottom. Timeline is **display-only** — events are not clickable.
 
 ---
 

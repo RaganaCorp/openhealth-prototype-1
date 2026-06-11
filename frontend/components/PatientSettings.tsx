@@ -40,8 +40,23 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
             if (name.trim() !== patient.name) {
               updates.name = name.trim();
             }
-            updates.memory_results_override = memoryResultsOverride.trim() === "" ? null : Number(memoryResultsOverride);
-            updates.context_window_tokens_override = contextWindowOverride.trim() === "" ? null : Number(contextWindowOverride);
+
+            // Blank => clear the override (null). Otherwise require a positive
+            // whole number; NaN flags invalid input so we don't silently send it.
+            const parseOverride = (raw: string): number | null => {
+              const trimmed = raw.trim();
+              if (trimmed === "") return null;
+              const value = Number(trimmed);
+              return Number.isInteger(value) && value > 0 ? value : NaN;
+            };
+            const memory = parseOverride(memoryResultsOverride);
+            const context = parseOverride(contextWindowOverride);
+            if (Number.isNaN(memory) || Number.isNaN(context)) {
+              setError("Overrides must be positive whole numbers, or left blank to use the global default.");
+              return;
+            }
+            updates.memory_results_override = memory;
+            updates.context_window_tokens_override = context;
 
             try {
               setSaving(true);
@@ -65,8 +80,10 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
               <span className="field-label">Memory threshold override</span>
               <input
                 className="field-input"
+                min={1}
                 onChange={(event) => setMemoryResultsOverride(event.target.value)}
                 placeholder="Use global default"
+                step={1}
                 type="number"
                 value={memoryResultsOverride}
               />
@@ -75,8 +92,10 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
               <span className="field-label">Context window override</span>
               <input
                 className="field-input"
+                min={1}
                 onChange={(event) => setContextWindowOverride(event.target.value)}
                 placeholder="Use global default"
+                step={1}
                 type="number"
                 value={contextWindowOverride}
               />

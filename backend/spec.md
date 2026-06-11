@@ -34,7 +34,7 @@ backend/
 ├── main.py         # FastAPI routes (all endpoints)
 ├── memory.py       # ChromaDB wrapper (doc chunks + chat history collections)
 ├── patients.py     # JSON persistence for patient index, patient.json, chat message logs
-├── timeline.py     # LLM-based timeline extraction
+├── timeline.py     # LLM calls: summary generation, grounding/citation verification, conversation-state updates, session-title generation, query classification
 ├── watcher.py      # watchdog-based watcher; monitors uploads/ per patient
 ├── Dockerfile
 └── requirements.txt  # fastapi, uvicorn, pymupdf, pytesseract, chromadb, watchdog, pillow
@@ -84,8 +84,6 @@ PDFs / TIFFs / TXTs / HTMLs / JSONs
         ▼
   write_patient.md  (all docs concatenated with document boundaries)
         │
-        ├──▶  generate_full_timeline()  →  one LLM call  →  timeline events
-        │
         └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
                                            ├── Pass 1: structured extraction
                                            │   (conditions / medications / procedures / labs → JSON)
@@ -113,7 +111,7 @@ If a source file is detected as changed, its `.extracted` sidecar is **overwritt
 
 ### Full rebuild (`POST /rebuild/{patient_id}`)
 
-Clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. Timeline and summary are also regenerated. Chat history in `_chat` collections is **never cleared** on any rebuild.
+Clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. The summary is also regenerated. Chat history in `_chat` collections is **never cleared** on any rebuild.
 
 ---
 
@@ -241,7 +239,6 @@ update_conversation_state()    ← refresh rolling summary + unresolved question
   "last_ingested_at": "ISO timestamp",
   "document_count": 12,
   "documents": [],
-  "timeline": [],
   "summary": "string",
   "chat_sessions": [],
   "conversation_states": {},
@@ -265,20 +262,6 @@ update_conversation_state()    ← refresh rolling summary + unresolved question
   "ingested_at": "ISO timestamp",
   "mtime": "float (Unix timestamp, from os.path.getmtime)",
   "size": "int (bytes, from os.path.getsize)"
-}
-```
-
-### Timeline Event
-```json
-{
-  "id": "uuid",
-  "patient_id": "uuid",
-  "document_id": "uuid",
-  "date": "2026-01-15",
-  "title": "string",
-  "summary": "string",
-  "document_type": "string",
-  "source_filename": "string"
 }
 ```
 
@@ -370,12 +353,10 @@ Flat ordered log; source of truth for rendering chat history in the UI. Separate
 
 - `POST /patients/{id}/upload` — multipart/form-data; one or more files. Writes files to `./data/patients/{slug}/uploads/`. Triggers incremental ingestion automatically. Returns `{ filenames: [], job_id }`.
 
-### Summary & Timeline
+### Summary
 
 - `GET /summary/{patient_id}` — returns `{ "summary": "markdown string" }`.
 - `POST /summary/{patient_id}` — regenerates summary via LLM; returns `{ "summary": "markdown string" }`.
-- `GET /timeline/{patient_id}` — returns timeline events sorted by date.
-- `GET /timeline/{patient_id}/{event_id}` — returns a single timeline event.
 
 ### Chat
 
@@ -499,14 +480,6 @@ List recent procedures or hospitalizations.
 
 ## Key Concerns
 Note patterns, gaps, or items that warrant attention.
-```
-
-### Timeline generation
-```
-You are a medical timeline extractor.
-Extract every medical event from the following records as a chronological list.
-For each event include: exact date, one-line title, document type, source filename.
-Do not infer or summarize — only extract what is explicitly stated.
 ```
 
 ### JSON extraction

@@ -289,7 +289,6 @@ def _has_admin_noise(text: str) -> bool:
         "guarantor",
         "address:",
         "powered by",
-        "allscripts",
     ]
     lowered = text.lower()
     hits = sum(1 for marker in markers if marker in lowered)
@@ -371,7 +370,7 @@ def _prepare_summary_records(patient_md: str) -> str:
         "payers",
         "insurance providers",
         "guarantors",
-        "powered by allscripts",
+        "powered by",
     ]
 
     blocks: list[str] = []
@@ -425,29 +424,46 @@ def _extract_top_section_blob(text: str, section_name: str) -> str:
 
 
 def _extract_structured_fallback(patient_md: str) -> dict:
-    """Best-effort deterministic extraction when LLM pass-1 returns sparse output."""
+    """Best-effort deterministic extraction when LLM pass-1 returns sparse output.
+
+    Uses only general, structural signals — ICD-coded problems, dosed medications,
+    the allergies section, and common lab analytes — never patient- or
+    sample-specific term lists, so it generalises across any record.
+    """
+    empty = {
+        "demographics": {"age": None, "sex": None},
+        "conditions": [],
+        "medications": [],
+        "procedures": [],
+        "allergies": [],
+        "key_labs": [],
+        "concerns": [],
+    }
     if not patient_md.strip():
-        return {
-            "demographics": {"age": None, "sex": None},
-            "conditions": [],
-            "medications": [],
-            "procedures": [],
-            "allergies": [],
-            "key_labs": [],
-            "concerns": [],
-        }
+        return empty
 
     cleaned = re.sub(r"(?mi)^={5,}.*$", " ", patient_md)
     cleaned = _normalize_ws(cleaned)
 
-    # Demographics: common CCD style "Male Sex" / "Female Sex".
+    # Demographics — common CCD phrasings.
     sex = None
     if re.search(r"\bmale\s+sex\b", cleaned, re.IGNORECASE):
         sex = "male"
     elif re.search(r"\bfemale\s+sex\b", cleaned, re.IGNORECASE):
         sex = "female"
 
-    # Conditions from ICD-like terms: "Condition Name (I10)".
+    age = None
+    age_match = (
+        re.search(r"\bage[:\s]+(\d{1,3})\b", cleaned, re.IGNORECASE)
+        or re.search(r"\b(\d{1,3})\s*(?:years?\s*old|y/?o)\b", cleaned, re.IGNORECASE)
+    )
+    if age_match:
+        age = age_match.group(1)
+
+    # Conditions — terms paired with an ICD-10 code, e.g. "Hypertension (I10)".
+    # ICD-10 Z-codes are administrative/screening/vaccination encounters ("factors
+    # influencing health status"), not clinical conditions, so exclude them by code
+    # class rather than blocklisting specific phrases.
     condition_sources = " ".join(
         part
         for part in [
@@ -461,17 +477,13 @@ def _extract_structured_fallback(patient_md: str) -> dict:
         r"([A-Z][A-Za-z0-9,\-'/ ]{2,80}?)\s*\(([A-TV-Z][0-9]{1,2}(?:\.[0-9A-Za-z]+)?)\)",
         condition_sources,
     )
-    blocked_condition_terms = {
-        "physical exam, annual",
-        "negative depression screening",
-        "need for flu vaccine",
-        "encounter for long-term (current) use of medications",
-    }
     conditions = _unique_keep_order(
-        [name.strip(" -") for name, _code in cond_matches if name.strip(" -").lower() not in blocked_condition_terms]
+        [name.strip(" -") for name, code in cond_matches if not code.upper().startswith("Z")]
     )
 
-    # Medications from medication section and common "has been on X and now Y" phrasing.
+    # Medications — a name followed by a dose (and optional frequency). Only dosed
+    # mentions are reliable without a drug dictionary; undosed mentions are left to
+    # the LLM pass rather than guessed from a hardcoded drug list.
     med_blob = _extract_top_section_blob(cleaned, "Medications") or cleaned
     med_matches = re.findall(
         r"\b([A-Z][A-Za-z0-9\-/]{2,}(?:\s+[A-Z][A-Za-z0-9\-/]{1,}){0,2})\s+"
@@ -485,74 +497,41 @@ def _extract_structured_fallback(patient_md: str) -> dict:
             for name, dose, freq in med_matches
         ]
     )
-    # Capture free-text med names even when doses are absent.
-    free_text_meds = re.findall(
-        r"\b(?:has been on|now|restart)\s+([A-Za-z][A-Za-z0-9\-/]{2,})",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    common_meds = re.findall(
-        r"\b(cabergoline|bromocriptine|spironolactone|benicar|potassium|benzaonatate|benzonatate|levaquin|azithromycin|medrol|flonase|sudafed|mucinex)\b",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    medications = _unique_keep_order(medications + free_text_meds + common_meds)
 
-    # Procedures and key visits from procedures/encounters and known visit markers.
-    proc_blob = " ".join(
-        part
-        for part in [
-            _extract_top_section_blob(cleaned, "Procedures"),
-            _extract_top_section_blob(cleaned, "Encounters"),
-            cleaned,
-        ]
-        if part
-    )
-    procedure_keywords = [
-        "hospital discharge follow-up",
-        "covid-19 vaccine administered",
-        "referred to ortho",
-        "mri",
-        "ultrasound",
-        "ct",
-        "on cpap",
-    ]
-    procedures: list[str] = []
-    for kw in procedure_keywords:
-        if re.search(rf"\b{re.escape(kw)}\b", proc_blob, re.IGNORECASE):
-            procedures.append(kw)
-    procedures = _unique_keep_order(procedures)
-
-    # Allergies from allergy section.
+    # Allergies — the allergies section, plus explicit "no known allergies" markers.
     allergy_blob = _extract_top_section_blob(cleaned, "Allergies and Adverse Reactions")
     allergies = _unique_keep_order(
-        re.findall(r"\b(No Known Allergies|No Known Drug Allergies|[A-Z][A-Za-z0-9 ,\-/]{2,40} allergy)\b", allergy_blob, re.IGNORECASE)
+        re.findall(
+            r"\b(No Known Allergies|No Known Drug Allergies|[A-Z][A-Za-z0-9 ,\-/]{2,40} allergy)\b",
+            allergy_blob,
+            re.IGNORECASE,
+        )
     )
 
-    # Labs from common analytes + numeric values.
+    # Key labs — common analytes paired with a numeric value. These analytes are
+    # ordered for most patients, so the list is general clinical knowledge rather
+    # than anything specific to one record.
     key_labs = _unique_keep_order(
         re.findall(
-            r"\b(?:A1c|HbA1c|AST|ALT|Potassium|K)\b[^\n]{0,30}?\b\d+(?:\.\d+)?\b",
+            r"\b(?:A1c|HbA1c|glucose|creatinine|BUN|sodium|potassium|chloride|calcium|"
+            r"hemoglobin|hematocrit|WBC|platelets?|AST|ALT|bilirubin|albumin|"
+            r"cholesterol|LDL|HDL|triglycerides|TSH)\b[^\n]{0,40}?\b\d+(?:\.\d+)?\b",
             cleaned,
             flags=re.IGNORECASE,
         )
     )
 
-    concerns: list[str] = []
-    concern_keywords = ["hypokalemia", "renal cancer", "morbid obesity", "right knee pain", "sleep apnea"]
-    lower = cleaned.lower()
-    for kw in concern_keywords:
-        if kw in lower:
-            concerns.append(kw)
-
+    # Procedures and concerns have no reliable structural signal without a curated
+    # vocabulary. Rather than guess from a hardcoded list (which only fits one
+    # record), leave them to the LLM extraction pass.
     return {
-        "demographics": {"age": None, "sex": sex},
+        "demographics": {"age": age, "sex": sex},
         "conditions": conditions[:30],
         "medications": medications[:20],
-        "procedures": procedures[:20],
+        "procedures": [],
         "allergies": allergies[:20],
         "key_labs": key_labs[:20],
-        "concerns": _unique_keep_order(concerns)[:20],
+        "concerns": [],
     }
 
 
@@ -676,7 +655,6 @@ def _prune_summary_sections(text: str) -> str:
         "phone",
         "email",
         "pharmacy",
-        "allscripts",
         "powered by",
         "staff",
     ]

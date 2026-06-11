@@ -68,18 +68,27 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
       return;
     }
 
+    let cancelled = false;
     async function load() {
       try {
         setError(null);
         const [loadedConfig, loadedModels] = await Promise.all([getConfig(), getModels()]);
+        if (cancelled) {
+          return;
+        }
         setConfig(loadedConfig);
         setModels(loadedModels);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load settings");
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Could not load settings");
+        }
       }
     }
 
     void load();
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   useEffect(() => {

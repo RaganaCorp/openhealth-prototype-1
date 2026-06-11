@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 
 import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
@@ -46,14 +46,24 @@ export default function PatientPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>("chat");
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  // True once the tracked job reached a terminal state (failed banner kept
+  // visible) — idle job detection may resume even though the banner is shown.
+  const [trackedJobTerminal, setTrackedJobTerminal] = useState(false);
+  // Guards against a slow response for the previous patient overwriting the
+  // newly selected patient's state (the App Router reuses this component
+  // instance when only the [id] param changes).
+  const patientIdRef = useRef(patientId);
 
   async function refreshSidebar() {
+    const pid = patientId;
     const [patientData, patientsData, sessionsData] = await Promise.all([
-      getPatient(patientId),
+      getPatient(pid),
       getPatients(),
-      getChatSessions(patientId),
+      getChatSessions(pid),
     ]);
-
+    if (patientIdRef.current !== pid) {
+      return sessionsData;
+    }
     setPatient(patientData);
     setPatients(patientsData);
     setSessions(sessionsData);
@@ -61,58 +71,90 @@ export default function PatientPage() {
   }
 
   async function refreshRecordView() {
-    const [summaryData, documentsData] = await Promise.all([getSummary(patientId), getDocuments(patientId)]);
+    const pid = patientId;
+    const [summaryData, documentsData] = await Promise.all([getSummary(pid), getDocuments(pid)]);
+    if (patientIdRef.current !== pid) {
+      return;
+    }
     setSummary(summaryData.summary);
     setDocuments(documentsData);
   }
 
   async function loadPage() {
+    const pid = patientId;
     try {
       setError(null);
       const loadedSessions = await refreshSidebar();
       await refreshRecordView();
 
-      if (!selectedSessionId) {
-        if (loadedSessions.length > 0) {
-          startTransition(() => {
-            router.replace(`/patient/${patientId}?session=${loadedSessions[0].id}`);
-          });
-        }
+      if (!selectedSessionId && patientIdRef.current === pid && loadedSessions.length > 0) {
+        // Land on the most recently active session — same ordering as the sidebar.
+        const newest = [...loadedSessions].sort((a, b) => {
+          const aTime = a.last_message_at ?? a.created_at ?? "";
+          const bTime = b.last_message_at ?? b.created_at ?? "";
+          return bTime.localeCompare(aTime);
+        })[0];
+        startTransition(() => {
+          router.replace(`/patient/${pid}?session=${newest.id}`);
+        });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load patient workspace");
+      if (patientIdRef.current === pid) {
+        setError(err instanceof Error ? err.message : "Could not load patient workspace");
+      }
     } finally {
-      setLoading(false);
+      if (patientIdRef.current === pid) {
+        setLoading(false);
+      }
     }
   }
 
   useEffect(() => {
+    // Reset all patient-scoped state immediately so the previous patient's
+    // medical data is never rendered (or sent to) under the new patient's URL.
+    patientIdRef.current = patientId;
+    setLoading(true);
+    setPatient(null);
+    setSummary("");
+    setDocuments([]);
+    setSessions([]);
+    setActiveJob(null);
+    setTrackedJobId(null);
+    setTrackedJobTerminal(false);
     void loadPage();
   }, [patientId]);
 
+  // Detect jobs started outside the UI (e.g. the file watcher ingesting a file
+  // dropped into the data folder). While a RUNNING job is tracked, IngestionProgress
+  // polls its status, so we stay idle here instead of polling redundantly. Once the
+  // tracked job is terminal (e.g. a failed banner left visible), detection resumes
+  // so a new backend job isn't invisible.
   useEffect(() => {
-    setTrackedJobId(null);
-    const interval = window.setInterval(async () => {
+    if (trackedJobId && !trackedJobTerminal) {
+      return;
+    }
+    let cancelled = false;
+    const check = async () => {
       try {
         const job = await getActiveJob(patientId);
-        if (job) {
+        if (!cancelled && job && job.job_id !== trackedJobId) {
           setActiveJob(job);
           setTrackedJobId(job.job_id);
+          setTrackedJobTerminal(false);
         }
       } catch {
-        // Keep the last known job visible if status polling is already handling it.
+        // Ignore transient polling errors.
       }
+    };
+    void check();
+    const interval = window.setInterval(() => {
+      void check();
     }, 2000);
-
-    void getActiveJob(patientId)
-      .then((job) => {
-        setActiveJob(job);
-        setTrackedJobId(job?.job_id ?? null);
-      })
-      .catch(() => setActiveJob(null));
-
-    return () => window.clearInterval(interval);
-  }, [patientId]);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [patientId, trackedJobId, trackedJobTerminal]);
 
   const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
 
@@ -240,20 +282,29 @@ export default function PatientPage() {
               <IngestionProgress
                 jobId={trackedJobId}
                 onResolved={async (job) => {
-                  await refreshSidebar();
-                  await refreshRecordView();
                   // Job is terminal — stop treating it as active so chat and
-                  // record actions unblock immediately.
+                  // record actions unblock immediately, and let idle job
+                  // detection resume.
                   setActiveJob(null);
+                  setTrackedJobTerminal(true);
                   // On success, hide the banner; on failure keep it visible
                   // (with a Dismiss button) so the error stays surfaced.
                   if (job.status === "complete") {
                     setTrackedJobId(null);
                   }
+                  await refreshSidebar();
+                  await refreshRecordView();
+                }}
+                onTerminalError={() => {
+                  // Job status is unreachable (e.g. backend restarted and the
+                  // in-memory job is gone) — unblock the UI and resume detection.
+                  setActiveJob(null);
+                  setTrackedJobTerminal(true);
                 }}
                 onDismiss={() => {
                   setActiveJob(null);
                   setTrackedJobId(null);
+                  setTrackedJobTerminal(false);
                 }}
               />
             </div>
@@ -269,7 +320,9 @@ export default function PatientPage() {
             </div>
           ) : null}
 
-          {activeTab === "chat" ? (
+          {/* Chat stays mounted across tab switches so an in-flight send (pending
+              bubble, thinking indicator, error state) isn't lost. */}
+          <div className={activeTab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
             <Chat
               activeJobId={activeJob?.job_id ?? null}
               onCreateSession={async () => {
@@ -286,7 +339,7 @@ export default function PatientPage() {
               patientId={patient.id}
               session={activeSession}
             />
-          ) : null}
+          </div>
 
           {activeTab === "files" ? (
             <div className="panel-scroll flex-1 space-y-5">
@@ -300,6 +353,7 @@ export default function PatientPage() {
                 onUploaded={(jobId) => {
                   const startedAt = new Date().toISOString();
                   setTrackedJobId(jobId);
+                  setTrackedJobTerminal(false);
                   setActiveJob({
                     job_id: jobId,
                     patient_id: patient.id,
@@ -339,6 +393,7 @@ export default function PatientPage() {
                           setDeletingDocumentId(doc.id);
                           const result = await deleteDocument(patient.id, doc.id);
                           setTrackedJobId(result.job_id);
+                          setTrackedJobTerminal(false);
                           setActiveJob({
                             job_id: result.job_id,
                             patient_id: patient.id,

@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 _observer: Optional[Observer] = None
 # Set by start_watcher; needed by the event handler to schedule coroutines.
 _loop: Optional[asyncio.AbstractEventLoop] = None
+# patient_id -> ObservedWatch, so watches can be removed on patient deletion.
+_watches: dict[str, object] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +81,23 @@ def add_patient_watch(patient_id: str, uploads_dir: Path) -> None:
     """Add a watch for a patient's uploads/ directory (thread-safe)."""
     if _observer is None:
         return
+    if patient_id in _watches:
+        return  # already watching — don't stack duplicate handlers
     uploads_dir.mkdir(parents=True, exist_ok=True)
     handler = _UploadsHandler(patient_id=patient_id, uploads_dir=uploads_dir)
-    _observer.schedule(handler, str(uploads_dir), recursive=False)
+    _watches[patient_id] = _observer.schedule(handler, str(uploads_dir), recursive=False)
     logger.info("Watcher: watching %s for patient %s", uploads_dir, patient_id)
+
+
+def remove_patient_watch(patient_id: str) -> None:
+    """Stop watching a deleted patient's uploads/ directory."""
+    watch = _watches.pop(patient_id, None)
+    if _observer is None or watch is None:
+        return
+    try:
+        _observer.unschedule(watch)
+    except Exception:
+        logger.warning("Watcher: failed to unschedule watch for patient %s", patient_id, exc_info=True)
 
 
 async def start_watcher() -> None:

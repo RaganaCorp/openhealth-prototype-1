@@ -15,7 +15,6 @@
 │                                                 │
 │  POST /ingest/{id}  →  Background job           │
 │  POST /chat         →  turn assembly + Ollama   │
-│  GET  /timeline     →  patients/{slug}/patient.json │
 │  GET  /summary      →  patients/{slug}/patient.json │
 └──────────┬──────────────────────┬───────────────┘
            │                      │
@@ -86,8 +85,6 @@ PDFs / TIFFs / TXTs / HTMLs
         ▼
   write_patient.md  (all docs concatenated with document boundaries)
         │
-        ├──▶  generate_full_timeline()  →  one LLM call  →  timeline events
-        │
         └──▶  _regenerate_summary()    →  two LLM calls →  structured summary
                                            ├── Pass 1: structured extraction
                                            │   (conditions / medications / procedures / labs → JSON)
@@ -106,7 +103,7 @@ Ingestion is triggered automatically after file upload completes (incremental). 
 
 **Incremental ingestion** (default for upload and watcher): only files not yet recorded in `patient.json` or files detected as changed are processed. Change detection uses file modification timestamp and file size (`mtime`, `size`) tracked per document record. `patient.md` is appended/updated for those files and only corresponding chunks are upserted in the `_docs` ChromaDB collection. Existing chat history is untouched.
 
-**Full rebuild** (`POST /rebuild/{patient_id}`): clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. Timeline and summary are also regenerated. Chat history in `_chat` is never cleared on any rebuild. This is exposed in the UI as a "Rebuild from scratch" action for cases where document order or extraction quality needs to be reset.
+**Full rebuild** (`POST /rebuild/{patient_id}`): clears `patient.md`, drops and re-creates the `_docs` ChromaDB collection, and re-processes every file in `uploads/` from scratch. The summary is also regenerated. Chat history in `_chat` is never cleared on any rebuild. This is exposed in the UI as a "Rebuild from scratch" action for cases where document order or extraction quality needs to be reset.
 
 **File scan rules**: uploaded files are stored in the `uploads/` subfolder of each patient folder. Ingestion scans only the top level of `uploads/` — subdirectories within it are ignored. The only exclusion applied is `*.extracted` files (they are cached extraction outputs, not source documents). All other files matching supported extensions (`.pdf`, `.tif`, `.tiff`, `.txt`, `.html`, `.json`) are processed. App-generated files (`patient.json`, `patient.md`) live outside `uploads/` in the patient root and are never scanned.
 
@@ -242,7 +239,6 @@ ChromaDB serves two distinct purposes:
   "last_ingested_at": "ISO timestamp",
   "document_count": 12,
   "documents": [],
-  "timeline": [],
   "summary": "string",
   "chat_sessions": [],
   "conversation_states": {},
@@ -266,20 +262,6 @@ ChromaDB serves two distinct purposes:
   "ingested_at": "ISO timestamp",
   "mtime": "float (Unix timestamp, from os.path.getmtime)",
   "size": "int (bytes, from os.path.getsize)"
-}
-```
-
-### Timeline Event
-```json
-{
-  "id": "uuid",
-  "patient_id": "uuid",
-  "document_id": "uuid",
-  "date": "2026-01-15",
-  "title": "string",
-  "summary": "string",
-  "document_type": "string",
-  "source_filename": "string"
 }
 ```
 
@@ -358,7 +340,7 @@ This flat ordered log is the source of truth for rendering chat history in the U
 - `GET /patients` — list all patients
 - `POST /patients` — create patient `{ name }`. Backend slugifies name, creates folder, returns `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }` (same thin shape as `GET /patients/{id}`).
 - `POST /patients/{id}/upload` — upload one or more files (multipart/form-data). Files are written to `./data/patients/{slug}/uploads/`. Returns `{ filenames[], job_id }`. Triggers ingestion automatically upon completion; `job_id` can be used immediately to poll `/status/{job_id}`.
-- `GET /patients/{id}` — get thin patient detail only: `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }`. Summary, timeline, chat sessions, and messages are fetched from their dedicated endpoints.
+- `GET /patients/{id}` — get thin patient detail only: `{ id, name, folder_slug, folder_path, document_count, last_ingested_at, created_at }`. Summary, chat sessions, and messages are fetched from their dedicated endpoints.
 - `PATCH /patients/{id}` — update patient fields. Accepts any subset of `{ name, memory_results_override, context_window_tokens_override }`. Renaming updates the `patients.json` index entry name; the folder slug is never changed. Returns the updated thin patient shape.
 - `DELETE /patients/{id}` — remove a patient from the list. The frontend shows a confirmation modal with checkboxes (all defaulted to on) before calling this endpoint:
   - Remove uploaded source files (`uploads/` folder)
@@ -377,11 +359,9 @@ This flat ordered log is the source of truth for rendering chat history in the U
 - `DELETE /documents/{patient_id}/{document_id}` — delete one uploaded document by ID, remove its cached `.extracted` sidecar, and trigger a rebuild. Returns `{ job_id }`.
 - `GET /patients/{id}/active-job` — returns the currently running ingestion job for a patient (or `null`). Used by the frontend to discover watcher-triggered jobs and display progress without a client-initiated `job_id`.
 
-### Summary & Timeline
+### Summary
 - `GET /summary/{patient_id}` — return stored summary as `{ "summary": "markdown string" }`
 - `POST /summary/{patient_id}` — regenerate summary, returns `{ "summary": "markdown string" }`
-- `GET /timeline/{patient_id}` — return timeline events sorted by date
-- `GET /timeline/{patient_id}/{event_id}` — return a single timeline event detail
 
 ### Chat
 - `POST /chat`
@@ -442,7 +422,7 @@ openhealth/
 │   ├── main.py         # FastAPI routes
 │   ├── memory.py       # ChromaDB wrapper (doc chunks + chat history collections)
 │   ├── patients.py     # JSON persistence for patient index, patient.json, chat message logs
-│   ├── timeline.py     # LLM-based timeline extraction
+│   ├── timeline.py     # LLM calls: summary generation, grounding/citation verification, conversation-state updates, session-title generation, query classification
 │   ├── watcher.py      # watchdog-based watcher; monitors uploads/ subfolder per patient; surfaces jobs via /status/{job_id}
 │   ├── Dockerfile
 │   └── requirements.txt  # includes: fastapi, uvicorn, pymupdf, pytesseract, chromadb, watchdog
@@ -463,8 +443,7 @@ openhealth/
 │   │   ├── DeletePatientModal.tsx  # confirmation modal with per-item checkboxes before delete
 │   │   ├── IngestionProgress.tsx
 │   │   ├── PatientSettings.tsx   # patient settings form (rename, overrides, document upload/delete, delete patient)
-│   │   ├── SummaryPanel.tsx      # renders summary markdown string as HTML
-│   │   └── Timeline.tsx
+│   │   └── SummaryPanel.tsx      # renders summary markdown string as HTML
 │   ├── lib/
 │   │   └── api.ts
 │   ├── Dockerfile
@@ -532,7 +511,7 @@ All runtime data lives under `./data/` in the project root, which is bind-mounte
 │   └── {patient_id}_chat_{session_id}/  # semantic chat memory per session
 └── patients/
     └── mary-johnson/                    # auto-created from patient name slug
-        ├── patient.json                 # per-patient data: documents, timeline, summary, sessions, states
+        ├── patient.json                 # per-patient data: documents, summary, sessions, states
         ├── patient.md                   # generated — full concatenated record
         ├── uploads/                     # source files uploaded via UI or placed manually
         │   ├── discharge_summary_jan2026.pdf
@@ -594,9 +573,6 @@ Passing the entire chat history on every call grows unbounded and eventually cro
 **Why two separate ChromaDB collections per patient?**
 Document chunks and chat history have different retrieval semantics, different metadata schemas, and different lifecycle needs (docs are cleared on re-ingest; chat history persists independently). Separating them avoids retrieval interference.
 
-**Why generate the timeline in one LLM call over `patient.md`?**
-Per-document timeline calls can only see one document at a time, missing context that spans documents. One call over the full record produces a coherent, deduplicated event list.
-
 **Why FastAPI over direct React → Ollama calls?**
 Document processing (PyMuPDF, OCR, chunking) requires Python. ChromaDB's Python client is the most mature interface. Async ingestion requires a server-side job runner.
 
@@ -613,7 +589,7 @@ Multi-turn drift is more likely when the model must carry context across many tu
 Large raw logs increase noise and context collisions. Structured state + semantic retrieval provides continuity with less token overhead and more stable behavior.
 
 **Why per-patient JSON record files instead of one `patients.json`?**
-A single file accumulates all patients' documents, timelines, and summaries, growing unbounded and requiring full rewrites on every change. Separate files keep I/O scoped per patient, prevent cross-patient data from ever occupying the same structure, and make corruption recovery easier.
+A single file accumulates all patients' documents and summaries, growing unbounded and requiring full rewrites on every change. Separate files keep I/O scoped per patient, prevent cross-patient data from ever occupying the same structure, and make corruption recovery easier.
 
 **Why incremental ingestion by default?**
 Re-processing all documents on every file addition is wasteful when a patient already has many files. Incremental ingestion appends only the new documents, keeping ingestion time proportional to the number of new files rather than the total. Full rebuild remains available for cases where document order, extraction quality, or embedding consistency needs resetting.
@@ -713,14 +689,6 @@ Do not invent facts not present in the provided data. Keep each section concise.
 Note patterns, gaps, or items that warrant attention based on the above facts.
 ```
 
-### Timeline generation
-```
-You are a medical timeline extractor.
-Extract every medical event from the following records as a chronological list.
-For each event include: exact date, one-line title, document type, source filename.
-Do not infer or summarize — only extract what is explicitly stated.
-```
-
 ### JSON extraction
 ```
 You are a medical data extractor. You have been given the raw contents of a JSON file
@@ -794,21 +762,21 @@ Changes take effect immediately on save. The modal closes on save or on click-ou
 │  ▸ Mom      ←    │  ─────────────────────────────────── │  ──────────────────  │
 │    Dad           │                                      │  [structured text]   │
 │    + Add Patient │  [message bubbles, scrollable]       │                      │
-│                  │                                      │  Timeline            │
-│ Chats            │                                      │  ──────────────────  │
-│  + New Chat      │                                      │  ● 2026-01-15        │
-│  ───────────     │                                      │    Discharge         │
-│  ▸ Medication    │                                      │  ● 2026-03-04        │
-│    review        │                                      │    Lab results       │
-│    Follow-up     │                                      │  ● 2026-04-10        │
-│    questions     │                                      │    Cardiology appt   │
+│                  │                                      │                      │
+│ Chats            │                                      │                      │
+│  + New Chat      │                                      │                      │
+│  ───────────     │                                      │                      │
+│  ▸ Medication    │                                      │                      │
+│    review        │                                      │                      │
+│    Follow-up     │                                      │                      │
+│    questions     │                                      │                      │
 │                  │  [text input]             [Send]     │                      │
 └──────────────────┴──────────────────────────────────────┴──────────────────────┘
 ```
 
 - **Left sidebar**: patient selector (all patients listed, active highlighted) followed by the chat/session list for the selected patient. "New Chat" button at the top of the list. A settings icon next to the active patient name links to `/patient/[id]/settings`.
 - **Main area**: active chat session. Shows session title with inline rename on click. Message bubbles for user and assistant. Citations rendered below each assistant message. Text input fixed at the bottom.
-- **Right sidebar**: summary rendered as markdown-to-HTML in a scrollable panel (`SummaryPanel.tsx`). The summary LLM output uses `##` markdown headers for each section — Overview, Active Conditions, Medications, Recent Procedures, Key Concerns. Frontend converts the stored markdown string to HTML for display and must sanitize the rendered HTML before injection. Vertical timeline below the summary panel (scrollable, chronological, oldest at top). Timeline is informational display only — events are not clickable.
+- **Right sidebar**: summary rendered as markdown-to-HTML in a scrollable panel (`SummaryPanel.tsx`). The summary LLM output uses `##` markdown headers for each section — Overview, Active Conditions, Medications, Recent Procedures, Key Concerns. Frontend converts the stored markdown string to HTML for display and must sanitize the rendered HTML before injection.
 
 ### Home Page
 
@@ -898,9 +866,8 @@ Inter is loaded via `next/font` (no external CDN call — consistent with offlin
 
 ## Layout and Components
 - 12-column desktop grid, 4-column mobile grid
-- Card-based information hierarchy for Daily Brief, What Changed, and Timeline modules
+- Card-based information hierarchy for Daily Brief and What Changed modules
 - Sticky top navigation with patient context and quick upload action
-- Timeline entries must prioritize date, event type, and source link visibility
 
 Core component states:
 - Upload status chips: `Processing`, `Ready`, `Needs Review`
@@ -910,7 +877,6 @@ Core component states:
 ## Motion and Interaction
 - Use subtle, purposeful motion only:
   - Staggered card reveal on dashboard load (100-180ms offsets)
-  - Smooth expand/collapse for timeline details
   - Gentle highlight transition for newly detected changes
 - Respect `prefers-reduced-motion`
 
