@@ -11,7 +11,7 @@ services:
   frontend:
     image: ghcr.io/raganacorp/openhealth-prototype1-frontend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - BACKEND_API_URL=http://backend:8000
@@ -24,7 +24,7 @@ services:
   backend:
     image: ghcr.io/raganacorp/openhealth-prototype1-backend:${OPENHEALTH_PROTOTYPE1_IMAGE_TAG:-latest}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - DATA_PATH=/data
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
