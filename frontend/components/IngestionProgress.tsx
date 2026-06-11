@@ -14,6 +14,14 @@ export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionPro
   const [job, setJob] = useState<JobStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const resolvedRef = useRef(false);
+  const onResolvedRef = useRef(onResolved);
+
+  // Keep the latest onResolved in a ref so it isn't an effect dependency. The
+  // parent passes a fresh inline callback on every render; depending on it would
+  // tear down and recreate the poll interval (and reset resolvedRef) each time.
+  useEffect(() => {
+    onResolvedRef.current = onResolved;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -33,9 +41,9 @@ export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionPro
           if (intervalId !== undefined) {
             window.clearInterval(intervalId);
           }
-          if (onResolved && !resolvedRef.current) {
+          if (!resolvedRef.current) {
             resolvedRef.current = true;
-            await onResolved(nextJob);
+            await onResolvedRef.current?.(nextJob);
           }
         }
       } catch (err) {
@@ -57,7 +65,7 @@ export function IngestionProgress({ jobId, onResolved, onDismiss }: IngestionPro
         window.clearInterval(intervalId);
       }
     };
-  }, [jobId, onResolved]);
+  }, [jobId]);
 
   if (error) {
     return <div className="status-error">{error}</div>;
