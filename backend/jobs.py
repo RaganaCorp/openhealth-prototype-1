@@ -36,6 +36,20 @@ _patient_active: dict[str, str] = {}
 # ingestion jobs never mutate the same patient.json concurrently.
 _patient_pending: dict[str, str] = {}
 
+# Strong references to in-flight background tasks. asyncio.create_task only keeps
+# a WEAK reference to the task, so a fire-and-forget task whose return value is
+# discarded can be garbage-collected mid-run — silently aborting an ingestion and
+# leaving the job stuck "running" forever. Holding the reference here (and clearing
+# it on completion) prevents that.
+_background_tasks: set = set()
+
+
+def _spawn(coro) -> "asyncio.Task":
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -335,11 +349,11 @@ def _schedule_followup_if_pending(patient_id: str) -> None:
         return
     job = _create_job(patient_id)
     if kind == "rebuild":
-        asyncio.create_task(_run_rebuild(patient_id, job))
+        _spawn(_run_rebuild(patient_id, job))
     else:
         # A plain incremental rescans all uploads, so any files that arrived
         # while the previous job ran are picked up — no need to track filenames.
-        asyncio.create_task(_run_incremental(patient_id, job, None))
+        _spawn(_run_incremental(patient_id, job, None))
 
 
 async def start_incremental_ingestion(
@@ -355,7 +369,7 @@ async def start_incremental_ingestion(
         _request_followup(patient_id, "incremental")
         return active
     job = _create_job(patient_id)
-    asyncio.create_task(_run_incremental(patient_id, job, target_filenames))
+    _spawn(_run_incremental(patient_id, job, target_filenames))
     return job
 
 
@@ -368,7 +382,7 @@ async def start_full_rebuild(patient_id: str) -> dict:
         _request_followup(patient_id, "rebuild")
         return active
     job = _create_job(patient_id)
-    asyncio.create_task(_run_rebuild(patient_id, job))
+    _spawn(_run_rebuild(patient_id, job))
     return job
 
 
@@ -383,7 +397,7 @@ async def start_document_deletion(patient_id: str, document_id: str) -> Optional
     if get_active_job(patient_id) is not None:
         return None
     job = _create_job(patient_id)
-    asyncio.create_task(_run_document_deletion(patient_id, job, document_id))
+    _spawn(_run_document_deletion(patient_id, job, document_id))
     return job
 
 
@@ -461,6 +475,14 @@ async def _run_incremental(
 
         _complete_job(job)
 
+    except asyncio.CancelledError:
+        # CancelledError is BaseException, not Exception, so it would otherwise
+        # skip _fail_job and leave _patient_active pointing at this job forever —
+        # permanently 409-blocking deletes and coalescing all future ingests into
+        # a follow-up that never fires. Mark it failed, then re-raise to honor
+        # the cancellation.
+        _fail_job(job, "cancelled")
+        raise
     except Exception as e:
         _fail_job(job, str(e))
     finally:
@@ -518,6 +540,14 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
         _complete_job(job)
 
+    except asyncio.CancelledError:
+        # CancelledError is BaseException, not Exception, so it would otherwise
+        # skip _fail_job and leave _patient_active pointing at this job forever —
+        # permanently 409-blocking deletes and coalescing all future ingests into
+        # a follow-up that never fires. Mark it failed, then re-raise to honor
+        # the cancellation.
+        _fail_job(job, "cancelled")
+        raise
     except Exception as e:
         _fail_job(job, str(e))
     finally:
@@ -576,6 +606,14 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
 
         _complete_job(job)
 
+    except asyncio.CancelledError:
+        # CancelledError is BaseException, not Exception, so it would otherwise
+        # skip _fail_job and leave _patient_active pointing at this job forever —
+        # permanently 409-blocking deletes and coalescing all future ingests into
+        # a follow-up that never fires. Mark it failed, then re-raise to honor
+        # the cancellation.
+        _fail_job(job, "cancelled")
+        raise
     except Exception as e:
         _fail_job(job, str(e))
     finally:

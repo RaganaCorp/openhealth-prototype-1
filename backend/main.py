@@ -319,9 +319,15 @@ async def upload_files(
     for file in files:
         safe_name = pt.sanitize_filename(file.filename or "upload")
         dest = pt.safe_upload_path(uploads_dir, safe_name)
+        # Stream to disk in chunks and offload the blocking write to a thread, so
+        # a large upload neither buffers the whole file in RAM nor blocks the event
+        # loop (which would freeze chat and status polling for all requests).
         with open(dest, "wb") as out:
-            content = await file.read()
-            out.write(content)
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await asyncio.to_thread(out.write, chunk)
         saved_names.append(safe_name)
 
     job = await jobs.start_incremental_ingestion(patient_id, saved_names)
@@ -563,13 +569,30 @@ async def chat(body: ChatRequest):
         if entry is None:
             raise _http_404("Patient not found")
 
+        # Refuse to answer while an ingestion/rebuild/delete job is mutating the
+        # record. Otherwise chat would read a half-rebuilt vector store / patient.md
+        # and ground its answer in an inconsistent medical record.
+        if jobs.get_active_job(patient_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="The record is being updated. Please wait for ingestion to finish before sending a message.",
+            )
+
         record = await pt.load_patient_record(patient_id)
         if record is None:
             raise _http_404("Patient record not found")
 
-        # Per-patient overrides.
-        effective_memory_results = record.get("memory_results_override") or cfg.memory_results
-        effective_ctx_tokens = record.get("context_window_tokens_override") or cfg.context_window_tokens
+        # Per-patient overrides. Use an explicit None check so a deliberately
+        # stored 0 (e.g. disable semantic history retrieval) isn't silently
+        # treated as "unset" and overridden by the global default.
+        memory_results_override = record.get("memory_results_override")
+        effective_memory_results = (
+            memory_results_override if memory_results_override is not None else cfg.memory_results
+        )
+        ctx_tokens_override = record.get("context_window_tokens_override")
+        effective_ctx_tokens = (
+            ctx_tokens_override if ctx_tokens_override is not None else cfg.context_window_tokens
+        )
 
         # 1. Classify query for optimised chunk retrieval fallback.
         doc_type = tl.classify_query(user_message)
@@ -592,8 +615,13 @@ async def chat(body: ChatRequest):
             )
 
         # 4. Patient context — full patient.md or chunk fallback.
+        # Use a conservative ~3 chars/token estimate (not the optimistic 4): dense
+        # clinical text — codes, numbers, dates — tokenizes closer to 3 chars/token,
+        # and patient.md is date-ordered, so an underestimate makes Ollama silently
+        # truncate the TAIL (the most recent labs/meds). Falling back to chunk
+        # retrieval a little earlier is far safer than dropping the newest records.
         patient_md = await asyncio.to_thread(read_patient_md, Path(entry["folder_path"]))
-        token_estimate = len(patient_md) // 4
+        token_estimate = len(patient_md) // 3
         use_chunks = token_estimate > effective_ctx_tokens
 
         if use_chunks:
@@ -666,6 +694,7 @@ async def chat(body: ChatRequest):
         if should_verify:
             context_for_grounding = patient_context
             grounding_context_limit = max(8000, min(30000, effective_ctx_tokens // 2))
+            grounding_uncertainty = ""
             for attempt in range(cfg.grounding_max_retries + 1):
                 result = await tl.verify_grounding(
                     final_answer,
@@ -679,9 +708,16 @@ async def chat(body: ChatRequest):
                     retry_count = attempt
                 # Accept if uncertainty_note is empty or answer hasn't changed materially.
                 final_answer = result["corrected_answer"]
-                if not result.get("uncertainty_note") or attempt >= cfg.grounding_max_retries:
+                grounding_uncertainty = result.get("uncertainty_note") or ""
+                if not grounding_uncertainty or attempt >= cfg.grounding_max_retries:
                     break
                 # Retry with corrected answer as the new draft.
+
+            # Surface a residual uncertainty (incl. a verification that could not
+            # be completed — verify_grounding fails closed with a non-empty note)
+            # so the user is never shown an unverified answer as if it were clean.
+            if grounding_uncertainty:
+                final_answer = f"{final_answer}\n\n_{grounding_uncertainty.strip()}_"
 
         # 8. Persist exchange.
         now = _now()

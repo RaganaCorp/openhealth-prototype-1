@@ -110,6 +110,22 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     return null;
   }
 
+  // Always include the currently-configured model as an option, even if it's not
+  // in the installed list (uninstalled/renamed model, or Ollama unreachable so the
+  // list is empty). Otherwise the <select> would silently show the first installed
+  // model while still holding the old value, and an unrelated Save would repoint
+  // the model without the user noticing.
+  const renderModelOptions = (current: string) => {
+    const installed = new Set(models);
+    const options = !current || installed.has(current) ? models : [current, ...models];
+    return options.map((model) => (
+      <option key={model} value={model}>
+        {model}
+        {model === current && !installed.has(model) ? " (not installed)" : ""}
+      </option>
+    ));
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose} role="presentation">
       <div className="modal-panel" onClick={(event) => event.stopPropagation()}>
@@ -192,33 +208,21 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             <label className="field-group">
               <span className="field-label">Chat model (fast path)</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, chat_model: event.target.value })} value={config.chat_model}>
-                {models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {renderModelOptions(config.chat_model)}
               </select>
             </label>
 
             <label className="field-group">
               <span className="field-label">Clinical model</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, clinical_model: event.target.value })} value={config.clinical_model}>
-                {models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {renderModelOptions(config.clinical_model)}
               </select>
             </label>
 
             <label className="field-group">
               <span className="field-label">Verification model</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, verification_model: event.target.value })} value={config.verification_model}>
-                {models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {renderModelOptions(config.verification_model)}
               </select>
             </label>
 
@@ -229,11 +233,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChange={(event) => setConfig({ ...config, embedding_model: event.target.value })}
                 value={config.embedding_model}
               >
-                {models.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+                {renderModelOptions(config.embedding_model)}
               </select>
             </label>
 

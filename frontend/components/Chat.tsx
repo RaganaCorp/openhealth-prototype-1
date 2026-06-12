@@ -49,7 +49,10 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   const [error, setError] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [refinedResponseContent, setRefinedResponseContent] = useState<string | null>(null);
+  // Track which session the refined answer belongs to, so the "Answer was
+  // refined" badge can't leak onto an identically-worded message in another
+  // session after the user switches views.
+  const [refinedResponse, setRefinedResponse] = useState<{ sessionId: string; content: string } | null>(null);
   const [thinking, setThinking] = useState<{ visible: boolean; sessionId: string | null }>({
     visible: false,
     sessionId: null,
@@ -134,10 +137,15 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                 className="flex gap-2"
                 onSubmit={async (event) => {
                   event.preventDefault();
-                  await renameChatSession(patientId, session.id, titleDraft);
-                  setEditingTitle(false);
-                  if (onSessionChanged) {
-                    await onSessionChanged();
+                  try {
+                    setError(null);
+                    await renameChatSession(patientId, session.id, titleDraft);
+                    setEditingTitle(false);
+                    if (onSessionChanged) {
+                      await onSessionChanged();
+                    }
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Could not rename chat");
                   }
                 }}
               >
@@ -166,9 +174,14 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             <button
               className="button-secondary px-3 py-2 text-xs"
               onClick={async () => {
-                await deleteChatSession(patientId, session.id);
-                if (onSessionChanged) {
-                  await onSessionChanged();
+                try {
+                  setError(null);
+                  await deleteChatSession(patientId, session.id);
+                  if (onSessionChanged) {
+                    await onSessionChanged();
+                  }
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Could not delete chat");
                 }
               }}
               type="button"
@@ -187,10 +200,14 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
           {visibleMessages.map((message, index) => {
             const isAssistant = message.role === "assistant";
             const showRefined = Boolean(
-              isAssistant && refinedResponseContent && message.content === refinedResponseContent && index === visibleMessages.length - 1
+              isAssistant &&
+                refinedResponse &&
+                refinedResponse.sessionId === (session?.id ?? null) &&
+                message.content === refinedResponse.content &&
+                index === visibleMessages.length - 1
             );
             const assistantHtml = isAssistant
-              ? DOMPurify.sanitize(marked.parse(message.content) as string)
+              ? DOMPurify.sanitize(marked.parse(message.content, { async: false }))
               : "";
             return (
               <article className={`message-row ${isAssistant ? "justify-start" : "justify-end"}`} key={message.id}>
@@ -273,7 +290,9 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             setThinking({ visible: true, sessionId: targetSessionId });
             const response = await sendChat(patientId, targetSessionId, message);
             setThinking({ visible: false, sessionId: null });
-            setRefinedResponseContent(response.grounding_retried ? response.response : null);
+            setRefinedResponse(
+              response.grounding_retried ? { sessionId: targetSessionId, content: response.response } : null
+            );
             setMessages((current) => current.filter((m) => m.id !== localUserId));
             await loadMessages(targetSessionId);
             if (onSessionChanged) {

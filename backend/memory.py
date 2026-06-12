@@ -13,6 +13,7 @@ import asyncio
 import importlib.util
 import logging
 import os
+import re
 import threading
 from typing import Any, Optional
 
@@ -47,9 +48,18 @@ def _get_client() -> chromadb.PersistentClient:
     return _client
 
 
+def _sanitize_id(raw_id: str) -> str:
+    """Collapse a UUID to a collision-free token usable in a Chroma collection
+    name (alphanumerics only). Using the FULL id — not a truncated prefix — is
+    essential: two ids sharing a short prefix would otherwise map to the same
+    physical collection, cross-contaminating one patient's chunks into another's
+    and letting a prefix-based delete wipe a colliding patient's records."""
+    return re.sub(r"[^a-zA-Z0-9]", "", raw_id)
+
+
 def _patient_collection_prefix(patient_id: str) -> str:
     """Common prefix shared by all of a patient's collections (docs + chats)."""
-    return f"p_{patient_id[:8]}"
+    return f"p_{_sanitize_id(patient_id)}"
 
 
 def _docs_collection_name(patient_id: str) -> str:
@@ -57,7 +67,7 @@ def _docs_collection_name(patient_id: str) -> str:
 
 
 def _chat_collection_name(patient_id: str, session_id: str) -> str:
-    return f"{_patient_collection_prefix(patient_id)}_c_{session_id[:8]}"
+    return f"{_patient_collection_prefix(patient_id)}_c_{_sanitize_id(session_id)}"
 
 
 # ---------------------------------------------------------------------------

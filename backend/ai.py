@@ -201,7 +201,26 @@ async def embed(text: str) -> list[float]:
             raise RuntimeError(
                 f"Ollama embeddings transport failure for model '{cfg.embedding_model}': {exc}"
             ) from exc
-        return resp.json()["embedding"]
+
+        # Validate the response shape before handing the vector downstream: an
+        # unexpected/empty body would otherwise raise a bare KeyError (500) or,
+        # worse, push a malformed vector into ChromaDB and break all later queries
+        # for that collection. Different Ollama versions use "embedding" or
+        # "embeddings"; accept either.
+        payload = resp.json()
+        embedding = payload.get("embedding")
+        if embedding is None:
+            embeddings = payload.get("embeddings")
+            if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
+                embedding = embeddings[0]
+        if not isinstance(embedding, list) or not embedding or not all(
+            isinstance(v, (int, float)) for v in embedding
+        ):
+            raise RuntimeError(
+                f"Ollama returned an invalid embedding for model '{cfg.embedding_model}': "
+                f"expected a non-empty numeric vector, got {type(embedding).__name__}"
+            )
+        return embedding
 
 
 async def _chat_request(

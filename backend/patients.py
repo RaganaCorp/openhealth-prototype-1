@@ -170,44 +170,56 @@ def _thin_shape(entry: dict) -> dict:
 
 
 async def create_patient(name: str) -> dict:
-    slug = unique_slug(name)
     patient_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    folder_path = str(_patient_dir(slug))
 
-    # Create directories.
-    uploads_dir = _patient_dir(slug) / "uploads"
-    chats_dir = _patient_dir(slug) / "chats"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    chats_dir.mkdir(parents=True, exist_ok=True)
+    # Hold the index lock across slug allocation, folder creation, record write,
+    # and the index append. Otherwise two concurrent creates of the same name can
+    # both resolve to the same slug (neither folder exists yet at check time),
+    # clobber each other's patient.json, and leave two index entries pointing at
+    # one shared folder. Creating the folder under the lock means a waiting create
+    # sees it and bumps the counter (john-doe-2). Note we inline the index
+    # read/append/write here rather than call mutate_patients_index, which would
+    # re-acquire this same non-reentrant lock and deadlock.
+    async with _index_lock:
+        slug = unique_slug(name)
+        folder_path = str(_patient_dir(slug))
 
-    # Initial patient.json record.
-    record: dict[str, Any] = {
-        "id": patient_id,
-        "name": name,
-        "folder_slug": slug,
-        "folder_path": folder_path,
-        "last_ingested_at": None,
-        "document_count": 0,
-        "documents": [],
-        "chat_sessions": [],
-        "conversation_states": {},
-        "memory_results_override": None,
-        "context_window_tokens_override": None,
-    }
-    await asyncio.to_thread(_save_patient_record_sync, slug, record)
+        # Create directories.
+        uploads_dir = _patient_dir(slug) / "uploads"
+        chats_dir = _patient_dir(slug) / "chats"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        chats_dir.mkdir(parents=True, exist_ok=True)
 
-    # Index entry.
-    entry = {
-        "id": patient_id,
-        "name": name,
-        "folder_slug": slug,
-        "folder_path": folder_path,
-        "document_count": 0,
-        "last_ingested_at": None,
-        "created_at": now,
-    }
-    await mutate_patients_index(lambda index: index.append(entry))
+        # Initial patient.json record.
+        record: dict[str, Any] = {
+            "id": patient_id,
+            "name": name,
+            "folder_slug": slug,
+            "folder_path": folder_path,
+            "last_ingested_at": None,
+            "document_count": 0,
+            "documents": [],
+            "chat_sessions": [],
+            "conversation_states": {},
+            "memory_results_override": None,
+            "context_window_tokens_override": None,
+        }
+        await asyncio.to_thread(_save_patient_record_sync, slug, record)
+
+        # Index entry.
+        entry = {
+            "id": patient_id,
+            "name": name,
+            "folder_slug": slug,
+            "folder_path": folder_path,
+            "document_count": 0,
+            "last_ingested_at": None,
+            "created_at": now,
+        }
+        index = await asyncio.to_thread(_load_index_sync)
+        index.append(entry)
+        await asyncio.to_thread(_save_index_sync, index)
 
     return _thin_shape(entry)
 

@@ -199,20 +199,26 @@ async def update_conversation_state(
             if isinstance(question, str) and question.strip():
                 open_questions.append(_trim_chars(question, 180))
 
-    if "?" in user_message:
-        open_questions.append(_trim_chars(user_message, 180))
-    open_questions = _unique_keep_order(open_questions)[-4:]
+    current_question = _trim_chars(user_message, 180) if "?" in user_message else None
+    if current_question:
+        open_questions.append(current_question)
+    open_questions = _unique_keep_order(open_questions)
 
     lowered_answer = assistant_response.lower()
-    resolved_markers = [
+    unresolved_markers = [
         "no clear evidence",
         "insufficient evidence",
         "not enough information",
         "uncertain",
     ]
-    if not any(marker in lowered_answer for marker in resolved_markers):
-        # Keep only the most recent unresolved question if the assistant provided a direct answer.
-        open_questions = open_questions[-1:]
+    answer_is_direct = not any(marker in lowered_answer for marker in unresolved_markers)
+    if answer_is_direct and current_question:
+        # A direct answer resolves only THIS turn's question. Drop just that one
+        # and keep the rest — previously the code truncated to the single most
+        # recent question, silently discarding genuinely unresolved ones whenever
+        # the model phrased its hedge differently than the marker list expects.
+        open_questions = [q for q in open_questions if q != current_question]
+    open_questions = open_questions[-4:]
 
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -232,21 +238,37 @@ async def verify_grounding(
     """
     Verify grounding of draft_answer against context.
     Returns { corrected_answer, citations, uncertainty_note }.
-    Falls back to original answer if parsing fails.
+
+    Fails CLOSED: if the verifier output can't be parsed, or comes back with an
+    empty corrected answer, we keep the draft but attach a non-empty
+    uncertainty_note. This matters for a clinical tool — a verification step that
+    silently passes the unverified draft through (empty note) is indistinguishable
+    from one that actually confirmed grounding, so callers must be able to tell
+    that the check did not complete.
     """
     prompt = build_grounding_prompt(draft_answer, context, context_limit)
     response = await ai.chat_complete([{"role": "user", "content": prompt}], model=model)
     parsed = _parse_json_response(response, fallback=None)
     if parsed and isinstance(parsed, dict) and "corrected_answer" in parsed:
+        corrected = parsed.get("corrected_answer", draft_answer)
+        uncertainty_note = parsed.get("uncertainty_note", "")
+        if not (isinstance(corrected, str) and corrected.strip()):
+            # The verifier returned an empty answer — don't surface a blank
+            # response to the user; keep the draft and flag that it's unverified.
+            corrected = draft_answer
+            uncertainty_note = (
+                uncertainty_note
+                or "Automated grounding check returned no answer; response could not be verified against the record."
+            )
         return {
-            "corrected_answer": parsed.get("corrected_answer", draft_answer),
+            "corrected_answer": corrected,
             "citations": parsed.get("citations", []),
-            "uncertainty_note": parsed.get("uncertainty_note", ""),
+            "uncertainty_note": uncertainty_note,
         }
     return {
         "corrected_answer": draft_answer,
         "citations": [],
-        "uncertainty_note": "",
+        "uncertainty_note": "Automated grounding check could not be completed; this response was not verified against the record.",
     }
 
 
