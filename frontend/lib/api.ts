@@ -7,14 +7,32 @@ export type PatientCondition = {
   source: "preset" | "custom";
 };
 
-export type PatientIntake = {
-  name: string;
+export type SocialHistory = {
+  tobacco_status?: "never" | "former" | "current" | null;
+  tobacco_details?: string | null;
+  alcohol_status?: "never" | "occasional" | "moderate" | "heavy" | null;
+  alcohol_drinks_per_week?: number | null;
+  drug_status?: "never" | "former" | "current" | null;
+  drug_substances?: string | null;
+  sexual_activity_status?: "not_active" | "active" | null;
+  sexual_partners?: string | null;
+  sexual_partner_genders?: string | null;
+  sexual_protection?: "always" | "sometimes" | "never" | null;
+};
+
+export type PatientProfileData = {
   dob?: string | null;
   sex_assigned_at_birth?: SexAssignedAtBirth | null;
   gender_identity?: string | null;
   height_cm?: number | null;
   weight_kg?: number | null;
+  social_history?: SocialHistory | null;
   conditions?: PatientCondition[];
+};
+
+export type PatientIntake = {
+  name: string;
+  profile?: PatientProfileData;
 };
 
 export type Patient = {
@@ -27,12 +45,7 @@ export type Patient = {
   created_at: string;
   memory_results_override?: number | null;
   context_window_tokens_override?: number | null;
-  dob?: string | null;
-  sex_assigned_at_birth?: SexAssignedAtBirth | null;
-  gender_identity?: string | null;
-  height_cm?: number | null;
-  weight_kg?: number | null;
-  conditions?: PatientCondition[];
+  profile?: PatientProfileData | null;
 };
 
 export type ChatSession = {
@@ -221,6 +234,13 @@ export function patchPatient(
   return request<Patient>(`/patients/${patientId}`, {
     method: "PATCH",
     body: JSON.stringify(updates),
+  });
+}
+
+export function updatePatientProfile(patientId: string, profile: PatientProfileData) {
+  return request<Patient>(`/patients/${patientId}/profile`, {
+    method: "PUT",
+    body: JSON.stringify(profile),
   });
 }
 

@@ -5,11 +5,15 @@ import { useState } from "react";
 
 import { ConditionsStep } from "@/components/intake/ConditionsStep";
 import { DemographicsStep } from "@/components/intake/DemographicsStep";
+import { LifestyleStep } from "@/components/intake/LifestyleStep";
 import {
   buildIntakePayload,
   demographicsTouched,
   emptyDemographics,
+  emptySocialHistory,
+  socialHistoryTouched,
   type DemographicsDraft,
+  type SocialHistoryDraft,
 } from "@/components/intake/types";
 import { IngestionProgress } from "@/components/IngestionProgress";
 import { UploadArea } from "@/components/UploadArea";
@@ -21,13 +25,14 @@ type AddPatientFlowProps = {
   onComplete: (patient: Patient, uploaded: boolean) => void;
 };
 
-type WizardStep = "name" | "demographics" | "conditions" | "documents" | "processing";
+type WizardStep = "name" | "demographics" | "lifestyle" | "conditions" | "documents" | "processing";
 
 export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProps) {
   const router = useRouter();
   const [step, setStep] = useState<WizardStep>("name");
   const [name, setName] = useState("");
   const [demographics, setDemographics] = useState<DemographicsDraft>(emptyDemographics);
+  const [social, setSocial] = useState<SocialHistoryDraft>(emptySocialHistory);
   const [conditions, setConditions] = useState<PatientCondition[]>([]);
   const [patient, setPatient] = useState<Patient | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -42,6 +47,7 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
     setStep("name");
     setName("");
     setDemographics(emptyDemographics);
+    setSocial(emptySocialHistory);
     setConditions([]);
     setPatient(null);
     setJobId(null);
@@ -50,7 +56,12 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
   }
 
   function hasUnsavedInput(): boolean {
-    return name.trim() !== "" || demographicsTouched(demographics) || conditions.length > 0;
+    return (
+      name.trim() !== "" ||
+      demographicsTouched(demographics) ||
+      socialHistoryTouched(social) ||
+      conditions.length > 0
+    );
   }
 
   function dismiss() {
@@ -78,7 +89,7 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
     try {
       setSubmitting(true);
       setError(null);
-      const created = await createPatient(buildIntakePayload(name, demographics, conditions));
+      const created = await createPatient(buildIntakePayload(name, demographics, social, conditions));
       setPatient(created);
       setStep("documents");
     } catch (err) {
@@ -94,14 +105,14 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
     router.push(`/patient/${target.id}`);
   }
 
-  const stepIndex = { name: 0, demographics: 1, conditions: 2, documents: 3, processing: 3 }[step];
+  const stepIndex = { name: 0, demographics: 1, lifestyle: 2, conditions: 3, documents: 4, processing: 4 }[step];
 
   return (
     <div className="modal-overlay" onClick={dismiss} role="presentation">
       <div className="modal-panel max-w-2xl" onClick={(event) => event.stopPropagation()}>
         {step !== "processing" ? (
           <div className="wizard-progress" aria-hidden>
-            {[0, 1, 2, 3].map((index) => (
+            {[0, 1, 2, 3, 4].map((index) => (
               <span className={`wizard-dot ${index <= stepIndex ? "active" : ""}`} key={index} />
             ))}
           </div>
@@ -158,6 +169,26 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
                 <button className="button-secondary" onClick={dismiss} type="button">
                   Cancel
                 </button>
+                <button className="button-primary" onClick={() => setStep("lifestyle")} type="button">
+                  Continue
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {step === "lifestyle" ? (
+          <div>
+            <LifestyleStep onChange={setSocial} patientName={name} value={social} />
+            {error ? <div className="status-error mt-4">{error}</div> : null}
+            <div className="mt-6 flex justify-between gap-3">
+              <button className="button-secondary" onClick={() => setStep("demographics")} type="button">
+                Back
+              </button>
+              <div className="flex gap-3">
+                <button className="button-secondary" onClick={dismiss} type="button">
+                  Cancel
+                </button>
                 <button className="button-primary" onClick={() => setStep("conditions")} type="button">
                   Continue
                 </button>
@@ -171,7 +202,7 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
             <ConditionsStep onChange={setConditions} patientName={name} selected={conditions} />
             {error ? <div className="status-error mt-4">{error}</div> : null}
             <div className="mt-6 flex justify-between gap-3">
-              <button className="button-secondary" onClick={() => setStep("demographics")} type="button">
+              <button className="button-secondary" onClick={() => setStep("lifestyle")} type="button">
                 Back
               </button>
               <div className="flex gap-3">

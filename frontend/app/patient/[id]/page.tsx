@@ -327,7 +327,9 @@ export default function PatientPage() {
             />
           </div>
 
-          {activeTab === "profile" ? <PatientProfile patient={patient} /> : null}
+          {activeTab === "profile" ? (
+            <PatientProfile onSaved={(updated) => setPatient(updated)} patient={patient} />
+          ) : null}
 
           {activeTab === "files" ? (
             <div className="panel-scroll flex-1 space-y-5">
