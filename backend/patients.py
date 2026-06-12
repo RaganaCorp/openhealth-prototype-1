@@ -169,7 +169,16 @@ def _thin_shape(entry: dict) -> dict:
     }
 
 
-async def create_patient(name: str) -> dict:
+async def create_patient(
+    name: str,
+    *,
+    dob: Optional[str] = None,
+    sex_assigned_at_birth: Optional[str] = None,
+    gender_identity: Optional[str] = None,
+    height_cm: Optional[float] = None,
+    weight_kg: Optional[float] = None,
+    conditions: Optional[list[dict]] = None,
+) -> dict:
     patient_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
@@ -197,8 +206,15 @@ async def create_patient(name: str) -> dict:
             "name": name,
             "folder_slug": slug,
             "folder_path": folder_path,
+            "created_at": now,
             "last_ingested_at": None,
             "document_count": 0,
+            "dob": dob,
+            "sex_assigned_at_birth": sex_assigned_at_birth,
+            "gender_identity": gender_identity,
+            "height_cm": height_cm,
+            "weight_kg": weight_kg,
+            "conditions": conditions or [],
             "documents": [],
             "chat_sessions": [],
             "conversation_states": {},

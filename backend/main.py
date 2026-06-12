@@ -13,7 +13,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import ai
 import jobs
@@ -133,8 +133,77 @@ def _safe_error_detail(exc: Exception, fallback: str) -> str:
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+_SEX_VALUES = {"male", "female", "intersex", "undisclosed"}
+_CONDITION_SOURCES = {"preset", "custom"}
+
+
+class ConditionIn(BaseModel):
+    category: str
+    code: str
+    label: str
+    source: str = "preset"
+
+    @field_validator("category", "code", "label")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Condition fields cannot be empty")
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def _valid_source(cls, value: str) -> str:
+        if value not in _CONDITION_SOURCES:
+            raise ValueError(f"source must be one of {sorted(_CONDITION_SOURCES)}")
+        return value
+
+
 class CreatePatientRequest(BaseModel):
     name: str
+    dob: Optional[str] = None
+    sex_assigned_at_birth: Optional[str] = None
+    gender_identity: Optional[str] = None
+    height_cm: Optional[float] = None
+    weight_kg: Optional[float] = None
+    conditions: list[ConditionIn] = []
+
+    @field_validator("gender_identity", "dob", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("dob")
+    @classmethod
+    def _valid_dob(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("dob must be a valid YYYY-MM-DD date")
+        if parsed > datetime.now(timezone.utc).date():
+            raise ValueError("dob cannot be in the future")
+        return value
+
+    @field_validator("sex_assigned_at_birth", mode="before")
+    @classmethod
+    def _valid_sex(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if value not in _SEX_VALUES:
+            raise ValueError(f"sex_assigned_at_birth must be one of {sorted(_SEX_VALUES)}")
+        return value
+
+    @field_validator("height_cm", "weight_kg")
+    @classmethod
+    def _positive_measure(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("measurements must be positive")
+        return value
 
 
 class PatchPatientRequest(BaseModel):
@@ -197,7 +266,15 @@ async def list_patients():
 async def create_patient(body: CreatePatientRequest):
     if not body.name.strip():
         raise HTTPException(status_code=422, detail="Patient name cannot be empty")
-    patient = await pt.create_patient(body.name.strip())
+    patient = await pt.create_patient(
+        body.name.strip(),
+        dob=body.dob,
+        sex_assigned_at_birth=body.sex_assigned_at_birth,
+        gender_identity=body.gender_identity,
+        height_cm=body.height_cm,
+        weight_kg=body.weight_kg,
+        conditions=[c.model_dump() for c in body.conditions],
+    )
     # Start watching the new patient's uploads/ folder.
     entry = await pt.find_patient_by_id(patient["id"])
     if entry:
@@ -222,6 +299,12 @@ async def get_patient(patient_id: str):
         "created_at": entry["created_at"],
         "memory_results_override": None if record is None else record.get("memory_results_override"),
         "context_window_tokens_override": None if record is None else record.get("context_window_tokens_override"),
+        "dob": None if record is None else record.get("dob"),
+        "sex_assigned_at_birth": None if record is None else record.get("sex_assigned_at_birth"),
+        "gender_identity": None if record is None else record.get("gender_identity"),
+        "height_cm": None if record is None else record.get("height_cm"),
+        "weight_kg": None if record is None else record.get("weight_kg"),
+        "conditions": [] if record is None else record.get("conditions", []),
     }
 
 

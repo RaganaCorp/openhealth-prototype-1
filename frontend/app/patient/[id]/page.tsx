@@ -7,6 +7,7 @@ import { startTransition, useEffect, useRef, useState } from "react";
 import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
 import { IngestionProgress } from "@/components/IngestionProgress";
+import { PatientProfile } from "@/components/PatientProfile";
 import { UploadArea } from "@/components/UploadArea";
 import {
   createChatSession,
@@ -23,7 +24,7 @@ import {
   type PatientDocument,
 } from "@/lib/api";
 
-type MainTab = "chat" | "files";
+type MainTab = "chat" | "profile" | "files";
 
 export default function PatientPage() {
   const params = useParams<{ id: string }>();
@@ -256,6 +257,13 @@ export default function PatientPage() {
                 Chat
               </button>
               <button
+                className={`tab-button ${activeTab === "profile" ? "active" : ""}`}
+                onClick={() => setActiveTab("profile")}
+                type="button"
+              >
+                Profile
+              </button>
+              <button
                 className={`tab-button ${activeTab === "files" ? "active" : ""}`}
                 onClick={() => setActiveTab("files")}
                 type="button"
@@ -318,6 +326,8 @@ export default function PatientPage() {
               session={activeSession}
             />
           </div>
+
+          {activeTab === "profile" ? <PatientProfile patient={patient} /> : null}
 
           {activeTab === "files" ? (
             <div className="panel-scroll flex-1 space-y-5">

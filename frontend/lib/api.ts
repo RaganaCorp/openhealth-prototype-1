@@ -1,3 +1,22 @@
+export type SexAssignedAtBirth = "male" | "female" | "intersex" | "undisclosed";
+
+export type PatientCondition = {
+  category: string;
+  code: string;
+  label: string;
+  source: "preset" | "custom";
+};
+
+export type PatientIntake = {
+  name: string;
+  dob?: string | null;
+  sex_assigned_at_birth?: SexAssignedAtBirth | null;
+  gender_identity?: string | null;
+  height_cm?: number | null;
+  weight_kg?: number | null;
+  conditions?: PatientCondition[];
+};
+
 export type Patient = {
   id: string;
   name: string;
@@ -8,6 +27,12 @@ export type Patient = {
   created_at: string;
   memory_results_override?: number | null;
   context_window_tokens_override?: number | null;
+  dob?: string | null;
+  sex_assigned_at_birth?: SexAssignedAtBirth | null;
+  gender_identity?: string | null;
+  height_cm?: number | null;
+  weight_kg?: number | null;
+  conditions?: PatientCondition[];
 };
 
 export type ChatSession = {
@@ -178,10 +203,10 @@ export function getPatient(patientId: string) {
   return request<Patient>(`/patients/${patientId}`);
 }
 
-export function createPatient(name: string) {
+export function createPatient(intake: PatientIntake) {
   return request<Patient>("/patients", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(intake),
   });
 }
 
