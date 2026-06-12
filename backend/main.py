@@ -362,6 +362,103 @@ def _patient_view(entry: dict, record: Optional[dict]) -> dict:
     }
 
 
+_SEX_DISPLAY = {
+    "male": "Male",
+    "female": "Female",
+    "intersex": "Intersex",
+    "undisclosed": "Prefer not to say",
+}
+
+
+def _profile_age(dob: Optional[str]) -> Optional[int]:
+    if not dob:
+        return None
+    try:
+        birth = datetime.strptime(dob, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(timezone.utc).date()
+    age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+    return age if age >= 0 else None
+
+
+def serialize_profile(profile: Optional[dict]) -> str:
+    """Render the structured intake profile (demographics, social history,
+    conditions) from patient.json as a readable block for the prompt. Returns ""
+    when there is nothing to show so callers can skip adding an empty part."""
+    if not profile:
+        return ""
+
+    lines: list[str] = []
+
+    dob = profile.get("dob")
+    if dob:
+        age = _profile_age(dob)
+        lines.append(f"Date of birth: {dob}" + (f" (age {age})" if age is not None else ""))
+    sex = profile.get("sex_assigned_at_birth")
+    if sex:
+        lines.append(f"Sex assigned at birth: {_SEX_DISPLAY.get(sex, sex)}")
+    gender = profile.get("gender_identity")
+    if gender:
+        lines.append(f"Gender identity: {gender}")
+    height_cm = profile.get("height_cm")
+    if isinstance(height_cm, (int, float)):
+        lines.append(f"Height: {height_cm:g} cm")
+    weight_kg = profile.get("weight_kg")
+    if isinstance(weight_kg, (int, float)):
+        lines.append(f"Weight: {weight_kg:g} kg")
+
+    social = profile.get("social_history") or {}
+    social_lines: list[str] = []
+    tobacco_status = social.get("tobacco_status")
+    if tobacco_status:
+        detail = social.get("tobacco_details")
+        social_lines.append("Tobacco: " + tobacco_status + (f" — {detail}" if detail else ""))
+    alcohol_status = social.get("alcohol_status")
+    if alcohol_status:
+        dpw = social.get("alcohol_drinks_per_week")
+        extra = f" — {dpw:g} drinks/week" if isinstance(dpw, (int, float)) else ""
+        social_lines.append("Alcohol: " + alcohol_status + extra)
+    drug_status = social.get("drug_status")
+    if drug_status:
+        subs = social.get("drug_substances")
+        social_lines.append("Recreational drugs: " + drug_status + (f" — {subs}" if subs else ""))
+    sexual_status = social.get("sexual_activity_status")
+    if sexual_status == "active":
+        bits = []
+        if social.get("sexual_partners"):
+            bits.append(f"partners: {social['sexual_partners']}")
+        if social.get("sexual_partner_genders"):
+            bits.append(f"gender(s): {social['sexual_partner_genders']}")
+        if social.get("sexual_protection"):
+            bits.append(f"protection: {social['sexual_protection']}")
+        social_lines.append("Sexual activity: active" + (f" — {'; '.join(bits)}" if bits else ""))
+    elif sexual_status == "not_active":
+        social_lines.append("Sexual activity: not active")
+    if social_lines:
+        lines.append("")
+        lines.append("Social history:")
+        lines.extend(f"- {s}" for s in social_lines)
+
+    conditions = profile.get("conditions") or []
+    grouped: dict[str, list[str]] = {}
+    for c in conditions:
+        category = c.get("category") or "Other"
+        label = c.get("label") or c.get("code")
+        if label:
+            grouped.setdefault(category, []).append(label)
+    if grouped:
+        lines.append("")
+        lines.append("Conditions:")
+        for category, labels in grouped.items():
+            lines.append(f"- {category}: {', '.join(labels)}")
+
+    if not lines:
+        return ""
+
+    return "PATIENT PROFILE\n" + "\n".join(lines)
+
+
 @app.get("/patients/{patient_id}")
 async def get_patient(patient_id: str):
     entry = await pt.find_patient_by_id(patient_id)
@@ -817,7 +914,14 @@ async def chat(body: ChatRequest):
 
         system_prompt = "\n".join(system_parts)
 
+        # Structured intake profile (demographics, social history, conditions) the
+        # user supplied about the patient. Sent as a user content part so it frames
+        # the question as user-provided context rather than ingested record text.
+        profile_text = serialize_profile(record.get("profile"))
+
         user_content_parts = []
+        if profile_text:
+            user_content_parts.append(profile_text)
         if state_capsule:
             user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
         if history_text:
