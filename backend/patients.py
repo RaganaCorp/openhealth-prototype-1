@@ -217,7 +217,6 @@ async def create_patient(
             "conditions": conditions or [],
             "documents": [],
             "chat_sessions": [],
-            "conversation_states": {},
             "memory_results_override": None,
             "context_window_tokens_override": None,
         }
@@ -433,6 +432,7 @@ async def delete_message_log(patient_id: str, session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def add_chat_session(patient_id: str, session: dict) -> None:
+    session.setdefault("title", "New Chat")
     await mutate_patient_record(
         patient_id, lambda r: r.setdefault("chat_sessions", []).append(session)
     )
@@ -462,7 +462,6 @@ async def delete_chat_session(patient_id: str, session_id: str) -> bool:
         sessions = record.get("chat_sessions", [])
         before = len(sessions)
         record["chat_sessions"] = [s for s in sessions if s["id"] != session_id]
-        record.get("conversation_states", {}).pop(session_id, None)
         deleted = len(record["chat_sessions"]) < before
 
     record = await mutate_patient_record(patient_id, _apply)
@@ -477,14 +476,21 @@ async def load_conversation_state(patient_id: str, session_id: str) -> Optional[
     record = await load_patient_record(patient_id)
     if record is None:
         return None
-    return record.get("conversation_states", {}).get(session_id)
+    session = next((s for s in record.get("chat_sessions", []) if s.get("id") == session_id), None)
+    if session is None:
+        return None
+    state = session.get("conversation_state")
+    return state if isinstance(state, dict) else None
 
 
 async def save_conversation_state(patient_id: str, session_id: str, state: dict) -> None:
-    await mutate_patient_record(
-        patient_id,
-        lambda r: r.setdefault("conversation_states", {}).__setitem__(session_id, state),
-    )
+    def _apply(record: dict) -> None:
+        for session in record.get("chat_sessions", []):
+            if session.get("id") == session_id:
+                session["conversation_state"] = state
+                return
+
+    await mutate_patient_record(patient_id, _apply)
 
 
 # ---------------------------------------------------------------------------

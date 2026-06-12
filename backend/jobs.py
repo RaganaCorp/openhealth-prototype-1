@@ -464,7 +464,7 @@ async def _run_incremental(
             await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
 
         # Update patient.json. Persist only owned fields via mutate_patient_record
-        # so a concurrent chat write (e.g. conversation_states) on the same record
+        # so a concurrent chat write (e.g. session conversation_state updates) on the same record
         # is not clobbered.
         def _apply(r: dict) -> None:
             r["documents"] = all_doc_records

@@ -514,21 +514,15 @@ async def create_session(patient_id: str, body: CreateSessionRequest):
         "created_at": now,
         "last_message_at": None,
         "message_count": 0,
+        "conversation_state": {
+            "rolling_summary": "",
+            "active_topics": [],
+            "open_questions": [],
+            "created_at": now,
+            "last_updated_at": now,
+        },
     }
     await pt.add_chat_session(patient_id, session)
-
-    # Initialise empty conversation state.
-    state = {
-        "patient_id": patient_id,
-        "session_id": session_id,
-        "title": session["title"],
-        "rolling_summary": "",
-        "active_topics": [],
-        "open_questions": [],
-        "created_at": now,
-        "last_updated_at": now,
-    }
-    await pt.save_conversation_state(patient_id, session_id, state)
 
     return {"chat_session_id": session_id}
 
@@ -579,8 +573,6 @@ async def reset_chat(patient_id: str, session_id: str):
     await memory.delete_chat_collection(patient_id, session_id)
     now = _now()
     state = {
-        "patient_id": patient_id,
-        "session_id": session_id,
         "rolling_summary": "",
         "active_topics": [],
         "open_questions": [],
@@ -617,8 +609,6 @@ async def rebuild_state(patient_id: str, session_id: str):
             if state is None:
                 now = _now()
                 state = {
-                    "patient_id": patient_id,
-                    "session_id": session_id,
                     "created_at": now,
                 }
             state.update(updates)
@@ -844,8 +834,6 @@ async def chat(body: ChatRequest):
         state_updates = await tl.update_conversation_state(conv_state, user_message, final_answer)
         if conv_state is None:
             conv_state = {
-                "patient_id": patient_id,
-                "session_id": session_id,
                 "created_at": now,
             }
         conv_state.update(state_updates)

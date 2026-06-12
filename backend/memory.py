@@ -2,14 +2,17 @@
 ChromaDB wrapper — document chunk store and per-session chat memory.
 
 Collection naming:
-  docs:  p_{patient_id[:8]}_docs
-  chat:  p_{patient_id[:8]}_c_{session_id[:8]}
+    docs:  p_{patient_id_sanitized}_docs
+    chat:  p_{patient_id_sanitized}_c_{session_token}
 
-ChromaDB limits collection names to 63 characters, so we use only the
-first 8 hex chars of each UUID (sufficient to avoid collisions in practice).
+ChromaDB limits collection names to 63 characters. A full sanitized UUID is 32
+chars, so chat names cannot contain both full patient and full session ids.
+We keep the full patient token in the prefix and derive a deterministic short
+session token from a stable hash to stay under the limit.
 """
 
 import asyncio
+import hashlib
 import importlib.util
 import logging
 import os
@@ -67,7 +70,22 @@ def _docs_collection_name(patient_id: str) -> str:
 
 
 def _chat_collection_name(patient_id: str, session_id: str) -> str:
-    return f"{_patient_collection_prefix(patient_id)}_c_{_sanitize_id(session_id)}"
+    # Keep full patient identity in the prefix, and a deterministic short
+    # session token so the name remains <= 63 chars for Chroma.
+    session_token = hashlib.blake2s(
+        session_id.encode("utf-8"),
+        digest_size=10,
+    ).hexdigest()
+    return f"{_patient_collection_prefix(patient_id)}_c_{session_token}"
+
+
+def _legacy_chat_collection_names(patient_id: str, session_id: str) -> list[str]:
+    """Legacy collection names used by older builds (8-char UUID prefixes)."""
+    patient_token = _sanitize_id(patient_id)[:8]
+    session_token = _sanitize_id(session_id)[:8]
+    if not patient_token or not session_token:
+        return []
+    return [f"p_{patient_token}_c_{session_token}"]
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +279,15 @@ def _query_chat_sync(
 ) -> list[dict]:
     with _chroma_lock:
         client = _get_client()
-        col_name = _chat_collection_name(patient_id, session_id)
-        try:
-            col = client.get_collection(col_name)
-        except Exception:
+        col = None
+        candidate_names = [_chat_collection_name(patient_id, session_id), *_legacy_chat_collection_names(patient_id, session_id)]
+        for col_name in candidate_names:
+            try:
+                col = client.get_collection(col_name)
+                break
+            except Exception:
+                continue
+        if col is None:
             return []
 
     with _chroma_lock:
@@ -312,11 +335,12 @@ async def query_chat(
 def _delete_chat_collection_sync(patient_id: str, session_id: str) -> None:
     with _chroma_lock:
         client = _get_client()
-        col_name = _chat_collection_name(patient_id, session_id)
-        try:
-            client.delete_collection(col_name)
-        except Exception:
-            pass
+        candidate_names = [_chat_collection_name(patient_id, session_id), *_legacy_chat_collection_names(patient_id, session_id)]
+        for col_name in candidate_names:
+            try:
+                client.delete_collection(col_name)
+            except Exception:
+                pass
 
 
 async def delete_chat_collection(patient_id: str, session_id: str) -> None:
