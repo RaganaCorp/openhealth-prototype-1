@@ -101,22 +101,29 @@ export function socialHistoryTouched(s: SocialHistoryDraft): boolean {
   return Object.values(s).some((v) => v !== "");
 }
 
-/** Build the canonical SocialHistory object, or null if nothing was entered. */
+/** Build the canonical SocialHistory object, or null if nothing was entered.
+ * Dependent fields are dropped when their parent status hides them, so a value
+ * left over from a prior selection is never persisted. */
 export function draftToSocialHistory(s: SocialHistoryDraft): SocialHistory | null {
   if (!socialHistoryTouched(s)) {
     return null;
   }
+  const tobaccoKeepsDetails = s.tobaccoStatus === "current" || s.tobaccoStatus === "former";
+  const alcoholKeepsDrinks = s.alcoholStatus !== "" && s.alcoholStatus !== "never";
+  const drugKeepsSubstances = s.drugStatus === "current" || s.drugStatus === "former";
+  const sexualActive = s.sexualActivityStatus === "active";
   return {
     tobacco_status: s.tobaccoStatus || null,
-    tobacco_details: s.tobaccoDetails.trim() || null,
+    tobacco_details: tobaccoKeepsDetails ? s.tobaccoDetails.trim() || null : null,
     alcohol_status: s.alcoholStatus || null,
-    alcohol_drinks_per_week: s.alcoholDrinksPerWeek.trim() ? Number(s.alcoholDrinksPerWeek) : null,
+    alcohol_drinks_per_week:
+      alcoholKeepsDrinks && s.alcoholDrinksPerWeek.trim() ? Number(s.alcoholDrinksPerWeek) : null,
     drug_status: s.drugStatus || null,
-    drug_substances: s.drugSubstances.trim() || null,
+    drug_substances: drugKeepsSubstances ? s.drugSubstances.trim() || null : null,
     sexual_activity_status: s.sexualActivityStatus || null,
-    sexual_partners: s.sexualPartners.trim() || null,
-    sexual_partner_genders: s.sexualPartnerGenders.trim() || null,
-    sexual_protection: s.sexualProtection || null,
+    sexual_partners: sexualActive ? s.sexualPartners.trim() || null : null,
+    sexual_partner_genders: sexualActive ? s.sexualPartnerGenders.trim() || null : null,
+    sexual_protection: sexualActive ? s.sexualProtection || null : null,
   };
 }
 

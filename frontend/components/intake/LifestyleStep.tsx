@@ -50,6 +50,32 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
     onChange({ ...value, ...updates });
   }
 
+  // When a status changes to a value that hides its dependent inputs, clear those
+  // inputs so a stale value (e.g. partners after switching to "not active") is
+  // never retained or saved.
+  function setTobaccoStatus(status: SocialHistoryDraft["tobaccoStatus"]) {
+    const keepsDetails = status === "current" || status === "former";
+    patch({ tobaccoStatus: status, ...(keepsDetails ? {} : { tobaccoDetails: "" }) });
+  }
+
+  function setAlcoholStatus(status: SocialHistoryDraft["alcoholStatus"]) {
+    const keepsDrinks = status !== "" && status !== "never";
+    patch({ alcoholStatus: status, ...(keepsDrinks ? {} : { alcoholDrinksPerWeek: "" }) });
+  }
+
+  function setDrugStatus(status: SocialHistoryDraft["drugStatus"]) {
+    const keepsSubstances = status === "current" || status === "former";
+    patch({ drugStatus: status, ...(keepsSubstances ? {} : { drugSubstances: "" }) });
+  }
+
+  function setSexualActivityStatus(status: SocialHistoryDraft["sexualActivityStatus"]) {
+    const keepsDetails = status === "active";
+    patch({
+      sexualActivityStatus: status,
+      ...(keepsDetails ? {} : { sexualPartners: "", sexualPartnerGenders: "", sexualProtection: "" }),
+    });
+  }
+
   const displayName = patientName.trim() || "this patient";
 
   return (
@@ -66,7 +92,7 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
       <div className="space-y-3">
         <ChipGroup
           legend="Smoking / tobacco"
-          onSelect={(v) => patch({ tobaccoStatus: v })}
+          onSelect={setTobaccoStatus}
           options={[
             { value: "never", label: "Never" },
             { value: "former", label: "Former" },
@@ -89,7 +115,7 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
       <div className="space-y-3">
         <ChipGroup
           legend="Alcohol use"
-          onSelect={(v) => patch({ alcoholStatus: v })}
+          onSelect={setAlcoholStatus}
           options={[
             { value: "never", label: "Never" },
             { value: "occasional", label: "Occasional" },
@@ -118,7 +144,7 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
       <div className="space-y-3">
         <ChipGroup
           legend="Recreational drug use"
-          onSelect={(v) => patch({ drugStatus: v })}
+          onSelect={setDrugStatus}
           options={[
             { value: "never", label: "Never" },
             { value: "former", label: "Former" },
@@ -141,7 +167,7 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
       <div className="space-y-3">
         <ChipGroup
           legend="Sexual activity"
-          onSelect={(v) => patch({ sexualActivityStatus: v })}
+          onSelect={setSexualActivityStatus}
           options={[
             { value: "not_active", label: "Not active" },
             { value: "active", label: "Active" },
