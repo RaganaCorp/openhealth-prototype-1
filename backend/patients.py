@@ -169,16 +169,19 @@ def _thin_shape(entry: dict) -> dict:
     }
 
 
-async def create_patient(
-    name: str,
-    *,
-    dob: Optional[str] = None,
-    sex_assigned_at_birth: Optional[str] = None,
-    gender_identity: Optional[str] = None,
-    height_cm: Optional[float] = None,
-    weight_kg: Optional[float] = None,
-    conditions: Optional[list[dict]] = None,
-) -> dict:
+def _empty_profile() -> dict[str, Any]:
+    return {
+        "dob": None,
+        "sex_assigned_at_birth": None,
+        "gender_identity": None,
+        "height_cm": None,
+        "weight_kg": None,
+        "social_history": None,
+        "conditions": [],
+    }
+
+
+async def create_patient(name: str, *, profile: Optional[dict] = None) -> dict:
     patient_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
@@ -209,12 +212,7 @@ async def create_patient(
             "created_at": now,
             "last_ingested_at": None,
             "document_count": 0,
-            "dob": dob,
-            "sex_assigned_at_birth": sex_assigned_at_birth,
-            "gender_identity": gender_identity,
-            "height_cm": height_cm,
-            "weight_kg": weight_kg,
-            "conditions": conditions or [],
+            "profile": {**_empty_profile(), **(profile or {})},
             "documents": [],
             "chat_sessions": [],
             "memory_results_override": None,
@@ -271,6 +269,18 @@ async def patch_patient(patient_id: str, updates: dict) -> Optional[dict]:
         shape["memory_results_override"] = record.get("memory_results_override")
         shape["context_window_tokens_override"] = record.get("context_window_tokens_override")
     return shape
+
+
+async def update_patient_profile(patient_id: str, profile: dict) -> Optional[dict]:
+    """Replace the patient's profile block (full PUT). Merges over an empty profile
+    so the stored shape always has every key. Returns the saved record, or None if
+    the patient no longer exists."""
+    merged = {**_empty_profile(), **(profile or {})}
+
+    def _apply(record: dict) -> None:
+        record["profile"] = merged
+
+    return await mutate_patient_record(patient_id, _apply)
 
 
 async def delete_patient_index_entry(patient_id: str) -> Optional[dict]:

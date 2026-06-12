@@ -135,6 +135,21 @@ def _safe_error_detail(exc: Exception, fallback: str) -> str:
 
 _SEX_VALUES = {"male", "female", "intersex", "undisclosed"}
 _CONDITION_SOURCES = {"preset", "custom"}
+# Allowed values for each enum-style social-history field.
+_SOCIAL_ENUMS = {
+    "tobacco_status": {"never", "former", "current"},
+    "alcohol_status": {"never", "occasional", "moderate", "heavy"},
+    "drug_status": {"never", "former", "current"},
+    "sexual_activity_status": {"not_active", "active"},
+    "sexual_protection": {"always", "sometimes", "never"},
+}
+
+
+def _blank_str_to_none(value):
+    """Coerce empty/whitespace strings to None and strip the rest; pass non-strings through."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
 
 
 class ConditionIn(BaseModel):
@@ -158,21 +173,70 @@ class ConditionIn(BaseModel):
         return value
 
 
-class CreatePatientRequest(BaseModel):
-    name: str
+class SocialHistoryIn(BaseModel):
+    tobacco_status: Optional[str] = None
+    tobacco_details: Optional[str] = None
+    alcohol_status: Optional[str] = None
+    alcohol_drinks_per_week: Optional[float] = None
+    drug_status: Optional[str] = None
+    drug_substances: Optional[str] = None
+    sexual_activity_status: Optional[str] = None
+    sexual_partners: Optional[str] = None
+    sexual_partner_genders: Optional[str] = None
+    sexual_protection: Optional[str] = None
+
+    @field_validator(
+        "tobacco_details",
+        "drug_substances",
+        "sexual_partners",
+        "sexual_partner_genders",
+        mode="before",
+    )
+    @classmethod
+    def _free_text(cls, value):
+        return _blank_str_to_none(value)
+
+    @field_validator(
+        "tobacco_status",
+        "alcohol_status",
+        "drug_status",
+        "sexual_activity_status",
+        "sexual_protection",
+        mode="before",
+    )
+    @classmethod
+    def _enum_fields(cls, value, info):
+        value = _blank_str_to_none(value)
+        if value is None:
+            return None
+        allowed = _SOCIAL_ENUMS[info.field_name]
+        if value not in allowed:
+            raise ValueError(f"{info.field_name} must be one of {sorted(allowed)}")
+        return value
+
+    @field_validator("alcohol_drinks_per_week")
+    @classmethod
+    def _non_negative(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("alcohol_drinks_per_week cannot be negative")
+        return value
+
+
+class ProfileIn(BaseModel):
     dob: Optional[str] = None
     sex_assigned_at_birth: Optional[str] = None
     gender_identity: Optional[str] = None
     height_cm: Optional[float] = None
     weight_kg: Optional[float] = None
+    social_history: Optional[SocialHistoryIn] = None
     conditions: list[ConditionIn] = []
 
     @field_validator("gender_identity", "dob", mode="before")
     @classmethod
     def _blank_to_none(cls, value):
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value.strip() if isinstance(value, str) else value
+        return _blank_str_to_none(value)
 
     @field_validator("dob")
     @classmethod
@@ -190,7 +254,8 @@ class CreatePatientRequest(BaseModel):
     @field_validator("sex_assigned_at_birth", mode="before")
     @classmethod
     def _valid_sex(cls, value):
-        if value is None or (isinstance(value, str) and not value.strip()):
+        value = _blank_str_to_none(value)
+        if value is None:
             return None
         if value not in _SEX_VALUES:
             raise ValueError(f"sex_assigned_at_birth must be one of {sorted(_SEX_VALUES)}")
@@ -204,6 +269,11 @@ class CreatePatientRequest(BaseModel):
         if value <= 0:
             raise ValueError("measurements must be positive")
         return value
+
+
+class CreatePatientRequest(BaseModel):
+    name: str
+    profile: Optional[ProfileIn] = None
 
 
 class PatchPatientRequest(BaseModel):
@@ -266,15 +336,8 @@ async def list_patients():
 async def create_patient(body: CreatePatientRequest):
     if not body.name.strip():
         raise HTTPException(status_code=422, detail="Patient name cannot be empty")
-    patient = await pt.create_patient(
-        body.name.strip(),
-        dob=body.dob,
-        sex_assigned_at_birth=body.sex_assigned_at_birth,
-        gender_identity=body.gender_identity,
-        height_cm=body.height_cm,
-        weight_kg=body.weight_kg,
-        conditions=[c.model_dump() for c in body.conditions],
-    )
+    profile = body.profile.model_dump() if body.profile is not None else None
+    patient = await pt.create_patient(body.name.strip(), profile=profile)
     # Start watching the new patient's uploads/ folder.
     entry = await pt.find_patient_by_id(patient["id"])
     if entry:
@@ -283,12 +346,8 @@ async def create_patient(body: CreatePatientRequest):
     return patient
 
 
-@app.get("/patients/{patient_id}")
-async def get_patient(patient_id: str):
-    entry = await pt.find_patient_by_id(patient_id)
-    if entry is None:
-        raise _http_404("Patient not found")
-    record = await pt.load_patient_record(patient_id)
+def _patient_view(entry: dict, record: Optional[dict]) -> dict:
+    """Full patient shape returned by GET and profile-update endpoints."""
     return {
         "id": entry["id"],
         "name": entry["name"],
@@ -299,13 +358,125 @@ async def get_patient(patient_id: str):
         "created_at": entry["created_at"],
         "memory_results_override": None if record is None else record.get("memory_results_override"),
         "context_window_tokens_override": None if record is None else record.get("context_window_tokens_override"),
-        "dob": None if record is None else record.get("dob"),
-        "sex_assigned_at_birth": None if record is None else record.get("sex_assigned_at_birth"),
-        "gender_identity": None if record is None else record.get("gender_identity"),
-        "height_cm": None if record is None else record.get("height_cm"),
-        "weight_kg": None if record is None else record.get("weight_kg"),
-        "conditions": [] if record is None else record.get("conditions", []),
+        "profile": None if record is None else record.get("profile"),
     }
+
+
+_SEX_DISPLAY = {
+    "male": "Male",
+    "female": "Female",
+    "intersex": "Intersex",
+    "undisclosed": "Prefer not to say",
+}
+
+
+def _profile_age(dob: Optional[str]) -> Optional[int]:
+    if not dob:
+        return None
+    try:
+        birth = datetime.strptime(dob, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(timezone.utc).date()
+    age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+    return age if age >= 0 else None
+
+
+def serialize_profile(profile: Optional[dict]) -> str:
+    """Render the structured intake profile (demographics, social history,
+    conditions) from patient.json as a readable block for the prompt. Returns ""
+    when there is nothing to show so callers can skip adding an empty part."""
+    if not profile:
+        return ""
+
+    lines: list[str] = []
+
+    dob = profile.get("dob")
+    if dob:
+        age = _profile_age(dob)
+        lines.append(f"Date of birth: {dob}" + (f" (age {age})" if age is not None else ""))
+    sex = profile.get("sex_assigned_at_birth")
+    if sex:
+        lines.append(f"Sex assigned at birth: {_SEX_DISPLAY.get(sex, sex)}")
+    gender = profile.get("gender_identity")
+    if gender:
+        lines.append(f"Gender identity: {gender}")
+    height_cm = profile.get("height_cm")
+    if isinstance(height_cm, (int, float)):
+        lines.append(f"Height: {height_cm:g} cm")
+    weight_kg = profile.get("weight_kg")
+    if isinstance(weight_kg, (int, float)):
+        lines.append(f"Weight: {weight_kg:g} kg")
+
+    social = profile.get("social_history") or {}
+    social_lines: list[str] = []
+    tobacco_status = social.get("tobacco_status")
+    if tobacco_status:
+        detail = social.get("tobacco_details")
+        social_lines.append("Tobacco: " + tobacco_status + (f" — {detail}" if detail else ""))
+    alcohol_status = social.get("alcohol_status")
+    if alcohol_status:
+        dpw = social.get("alcohol_drinks_per_week")
+        extra = f" — {dpw:g} drinks/week" if isinstance(dpw, (int, float)) else ""
+        social_lines.append("Alcohol: " + alcohol_status + extra)
+    drug_status = social.get("drug_status")
+    if drug_status:
+        subs = social.get("drug_substances")
+        social_lines.append("Recreational drugs: " + drug_status + (f" — {subs}" if subs else ""))
+    sexual_status = social.get("sexual_activity_status")
+    if sexual_status == "active":
+        bits = []
+        if social.get("sexual_partners"):
+            bits.append(f"partners: {social['sexual_partners']}")
+        if social.get("sexual_partner_genders"):
+            bits.append(f"gender(s): {social['sexual_partner_genders']}")
+        if social.get("sexual_protection"):
+            bits.append(f"protection: {social['sexual_protection']}")
+        social_lines.append("Sexual activity: active" + (f" — {'; '.join(bits)}" if bits else ""))
+    elif sexual_status == "not_active":
+        social_lines.append("Sexual activity: not active")
+    if social_lines:
+        lines.append("")
+        lines.append("Social history:")
+        lines.extend(f"- {s}" for s in social_lines)
+
+    conditions = profile.get("conditions") or []
+    grouped: dict[str, list[str]] = {}
+    for c in conditions:
+        category = c.get("category") or "Other"
+        label = c.get("label") or c.get("code")
+        if label:
+            grouped.setdefault(category, []).append(label)
+    if grouped:
+        lines.append("")
+        lines.append("Conditions:")
+        for category, labels in grouped.items():
+            lines.append(f"- {category}: {', '.join(labels)}")
+
+    if not lines:
+        return ""
+
+    return "PATIENT PROFILE\n" + "\n".join(lines)
+
+
+@app.get("/patients/{patient_id}")
+async def get_patient(patient_id: str):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+    record = await pt.load_patient_record(patient_id)
+    return _patient_view(entry, record)
+
+
+@app.put("/patients/{patient_id}/profile")
+async def update_patient_profile(patient_id: str, body: ProfileIn):
+    entry = await pt.find_patient_by_id(patient_id)
+    if entry is None:
+        raise _http_404("Patient not found")
+    record = await pt.update_patient_profile(patient_id, body.model_dump())
+    if record is None:
+        raise _http_404("Patient not found")
+    return _patient_view(entry, record)
 
 
 @app.patch("/patients/{patient_id}")
@@ -733,7 +904,14 @@ async def chat(body: ChatRequest):
 
         system_prompt = "\n".join(system_parts)
 
+        # Structured intake profile (demographics, social history, conditions) the
+        # user supplied about the patient. Sent as a user content part so it frames
+        # the question as user-provided context rather than ingested record text.
+        profile_text = serialize_profile(record.get("profile"))
+
         user_content_parts = []
+        if profile_text:
+            user_content_parts.append(profile_text)
         if state_capsule:
             user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
         if history_text:
