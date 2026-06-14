@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ConditionsStep } from "@/components/intake/ConditionsStep";
 import { DemographicsStep } from "@/components/intake/DemographicsStep";
@@ -38,6 +38,22 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
   const [jobId, setJobId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Escape-to-dismiss, matching the global Settings modal. Re-registers on the
+  // inputs `dismiss` reads so the unsaved-changes confirm always sees fresh state.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        dismiss();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, name, demographics, social, conditions, patient]);
 
   if (!open) {
     return null;
@@ -132,8 +148,8 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
               <p className="eyebrow">Add Patient</p>
               <h2 className="text-2xl font-semibold text-text-primary">Create a new patient workspace</h2>
               <p className="mt-2 text-sm leading-6 text-text-secondary">
-                Start with a name, then add demographics, conditions, and source documents — every step after this is
-                optional.
+                A name is all you need to start. Add demographics and conditions now if you like, or skip straight to
+                uploading documents.
               </p>
             </div>
             <label className="field-group">
@@ -146,13 +162,24 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
                 value={name}
               />
             </label>
-            <div className="flex justify-end gap-3">
-              <button className="button-secondary" onClick={dismiss} type="button">
-                Cancel
+            {error ? <div className="status-error">{error}</div> : null}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                className="button-secondary"
+                disabled={!name.trim() || submitting}
+                onClick={createWorkspace}
+                type="button"
+              >
+                {submitting ? "Creating…" : "Skip details & add documents"}
               </button>
-              <button className="button-primary" disabled={!name.trim()} type="submit">
-                Continue
-              </button>
+              <div className="flex justify-end gap-3">
+                <button className="button-secondary" onClick={dismiss} type="button">
+                  Cancel
+                </button>
+                <button className="button-primary" disabled={!name.trim() || submitting} type="submit">
+                  Continue
+                </button>
+              </div>
             </div>
           </form>
         ) : null}

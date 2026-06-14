@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { ArrowLeftIcon } from "@/components/icons";
 import { PatientSettings } from "@/components/PatientSettings";
 import { getPatient, type Patient } from "@/lib/api";
 
@@ -45,8 +46,8 @@ export default function PatientSettingsPage() {
 
   return (
     <div className="mx-auto max-w-4xl animate-fade-up">
-      <Link className="mb-4 inline-flex text-sm font-medium text-primary hover:text-primary-hover" href={`/patient/${patient.id}`}>
-        ← Back to patient workspace
+      <Link className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary-hover" href={`/patient/${patient.id}`}>
+        <ArrowLeftIcon size={16} /> Back to patient workspace
       </Link>
       <PatientSettings
         onDeleted={() => {

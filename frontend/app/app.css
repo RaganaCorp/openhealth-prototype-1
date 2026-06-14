@@ -1,4 +1,9 @@
 @import "tailwindcss";
+/* Tailwind v4 does not auto-load tailwind.config.ts. Without this directive the
+   theme.extend tokens (colors, fonts, fade-up animation) never compile, so every
+   themed utility class — text-text-secondary, bg-surface, text-primary, etc. —
+   silently no-ops. Keep this in sync with tailwind.config.ts. */
+@config "../tailwind.config.ts";
 
 :root {
   --color-background: #f8f9fa;
@@ -110,6 +115,7 @@ select {
   border-radius: 999px;
   border: 1px solid transparent;
   cursor: pointer;
+  white-space: nowrap;
   transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, transform 180ms ease;
 }
 

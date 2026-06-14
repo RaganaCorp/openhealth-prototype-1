@@ -3,6 +3,7 @@
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 
+import { GearIcon } from "@/components/icons";
 import { SettingsModal } from "@/components/SettingsModal";
 
 export function Header() {
@@ -24,7 +25,7 @@ export function Header() {
             </p>
           </div>
           <button aria-label="Open settings" className="icon-button" onClick={() => setOpen(true)} type="button">
-            ⚙
+            <GearIcon />
           </button>
         </div>
       </header>

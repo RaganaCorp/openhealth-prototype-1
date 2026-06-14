@@ -6,6 +6,7 @@ import { startTransition, useEffect, useRef, useState } from "react";
 
 import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
+import { GearIcon, PlusIcon } from "@/components/icons";
 import { IngestionProgress } from "@/components/IngestionProgress";
 import { PatientProfile } from "@/components/PatientProfile";
 import { UploadArea } from "@/components/UploadArea";
@@ -40,10 +41,15 @@ export default function PatientPage() {
   const [activeJob, setActiveJob] = useState<JobStatus | null>(null);
   const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Fatal load error (blocks the page only when there is no patient to show).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Transient action error (e.g. a failed delete) — shown as a dismissible banner
+  // inside the workspace, never replacing the whole page.
+  const [actionError, setActionError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>("chat");
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const [confirmingDeleteDocId, setConfirmingDeleteDocId] = useState<string | null>(null);
   // True once the tracked job reached a terminal state (failed banner kept
   // visible) — idle job detection may resume even though the banner is shown.
   const [trackedJobTerminal, setTrackedJobTerminal] = useState(false);
@@ -80,7 +86,7 @@ export default function PatientPage() {
   async function loadPage() {
     const pid = patientId;
     try {
-      setError(null);
+      setLoadError(null);
       const loadedSessions = await refreshSidebar();
       await refreshRecordView();
 
@@ -97,7 +103,7 @@ export default function PatientPage() {
       }
     } catch (err) {
       if (patientIdRef.current === pid) {
-        setError(err instanceof Error ? err.message : "Could not load patient workspace");
+        setLoadError(err instanceof Error ? err.message : "Could not load patient workspace");
       }
     } finally {
       if (patientIdRef.current === pid) {
@@ -111,6 +117,8 @@ export default function PatientPage() {
     // medical data is never rendered (or sent to) under the new patient's URL.
     patientIdRef.current = patientId;
     setLoading(true);
+    setLoadError(null);
+    setActionError(null);
     setPatient(null);
     setDocuments([]);
     setSessions([]);
@@ -158,8 +166,8 @@ export default function PatientPage() {
     return <div className="empty-state">Loading workspace…</div>;
   }
 
-  if (error || !patient) {
-    return <div className="status-error">{error ?? "Patient not found"}</div>;
+  if (loadError || !patient) {
+    return <div className="status-error">{loadError ?? "Patient not found"}</div>;
   }
 
   return (
@@ -167,47 +175,53 @@ export default function PatientPage() {
       <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
         <aside className="panel-card panel-scroll h-[calc(100vh-8.75rem)] animate-fade-up">
           <div className="flex items-center justify-between">
-            <div>
-              <p className="eyebrow">Patient</p>
-              <p className="text-sm text-text-secondary">Pick a patient workspace.</p>
-            </div>
-            <button className="icon-button" onClick={() => setAddOpen(true)} type="button">
-              +
+            <p className="eyebrow">Patients</p>
+            <button aria-label="Add patient" className="icon-button" onClick={() => setAddOpen(true)} type="button">
+              <PlusIcon />
             </button>
           </div>
 
-          <div className="mt-5 flex items-center gap-2">
-            <select
-              className="field-input"
-              onChange={(event) => {
-                const nextPatientId = event.target.value;
-                startTransition(() => {
-                  router.push(`/patient/${nextPatientId}`);
-                });
-              }}
-              value={patient.id}
-            >
-              {patients.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-            <Link aria-label="Patient settings" className="icon-button" href={`/patient/${patient.id}/settings`}>
-              ⚙
-            </Link>
-          </div>
-
-          <div className="mt-4 rounded-2xl border border-border/60 bg-surface p-3 text-xs text-text-secondary">
-            {patient.document_count} docs · Last ingest: {formatDate(patient.last_ingested_at)}
+          <div className="mt-4 space-y-2">
+            {patients.map((item) => {
+              const isActive = item.id === patient.id;
+              const meta = (
+                <>
+                  <span className="block truncate text-sm font-medium text-text-primary">{item.name}</span>
+                  <span className="mt-0.5 block text-xs text-text-secondary">
+                    {item.document_count} docs · {formatDate(item.last_ingested_at)}
+                  </span>
+                </>
+              );
+              if (isActive) {
+                return (
+                  <div className="patient-tile patient-tile-active" key={item.id}>
+                    <div className="min-w-0 flex-1">{meta}</div>
+                    <Link aria-label="Patient settings" className="icon-button h-9 w-9 shrink-0" href={`/patient/${patient.id}/settings`}>
+                      <GearIcon size={16} />
+                    </Link>
+                  </div>
+                );
+              }
+              return (
+                <button
+                  className="patient-tile"
+                  key={item.id}
+                  onClick={() => {
+                    startTransition(() => {
+                      router.push(`/patient/${item.id}`);
+                    });
+                  }}
+                  type="button"
+                >
+                  <div className="min-w-0 flex-1">{meta}</div>
+                </button>
+              );
+            })}
           </div>
 
           <div className="mt-6 border-t border-border/80 pt-5">
             <div className="flex items-center justify-between">
-              <div>
-                <p className="eyebrow">Chats</p>
-                <p className="text-sm text-text-secondary">Keep separate threads for distinct questions.</p>
-              </div>
+              <p className="eyebrow">Chats</p>
               <button
                 className="button-secondary whitespace-nowrap px-4 py-2 text-sm"
                 onClick={() => {
@@ -272,6 +286,15 @@ export default function PatientPage() {
               </button>
             </div>
           </div>
+
+          {actionError ? (
+            <div className="status-error mb-4 flex flex-wrap items-center justify-between gap-3">
+              <span>{actionError}</span>
+              <button className="button-secondary px-3 py-1 text-xs" onClick={() => setActionError(null)} type="button">
+                Dismiss
+              </button>
+            </div>
+          ) : null}
 
           {trackedJobId ? (
             <div className="mb-4">
@@ -362,52 +385,63 @@ export default function PatientPage() {
 
               <div className="space-y-2">
                 {documents.length === 0 ? <div className="empty-state">No documents loaded yet.</div> : null}
-                {documents.map((doc) => (
-                  <div className="patient-tile" key={doc.id}>
-                    <div className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">{doc.filename}</span>
-                      <span className="mt-1 block text-xs text-text-secondary">
-                        {doc.document_type} · {doc.date_detected}
-                      </span>
+                {documents.map((doc) => {
+                  const deleteDoc = async () => {
+                    setConfirmingDeleteDocId(null);
+                    try {
+                      setDeletingDocumentId(doc.id);
+                      const result = await deleteDocument(patient.id, doc.id);
+                      setTrackedJobId(result.job_id);
+                      setTrackedJobTerminal(false);
+                      setActiveJob({
+                        job_id: result.job_id,
+                        patient_id: patient.id,
+                        status: "running",
+                        total: 0,
+                        processed: 0,
+                        current_file: null,
+                        phase: "queued",
+                        phase_started_at: new Date().toISOString(),
+                        started_at: new Date().toISOString(),
+                        completed_at: null,
+                      });
+                    } catch (err) {
+                      setActionError(err instanceof Error ? err.message : "Could not delete document");
+                    } finally {
+                      setDeletingDocumentId(null);
+                    }
+                  };
+                  return (
+                    <div className="patient-tile" key={doc.id}>
+                      <div className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">{doc.filename}</span>
+                        <span className="mt-1 block text-xs text-text-secondary">
+                          {doc.document_type} · {doc.date_detected}
+                        </span>
+                      </div>
+                      {confirmingDeleteDocId === doc.id ? (
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="text-xs text-text-secondary">Delete &amp; rebuild?</span>
+                          <button className="button-danger px-3 py-2 text-xs" disabled={Boolean(trackedJobId)} onClick={deleteDoc} type="button">
+                            Delete
+                          </button>
+                          <button className="button-secondary px-3 py-2 text-xs" onClick={() => setConfirmingDeleteDocId(null)} type="button">
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          className="button-danger shrink-0 px-3 py-2 text-xs"
+                          disabled={Boolean(trackedJobId) || deletingDocumentId === doc.id}
+                          onClick={() => setConfirmingDeleteDocId(doc.id)}
+                          type="button"
+                        >
+                          {deletingDocumentId === doc.id ? "Deleting…" : "Delete"}
+                        </button>
+                      )}
                     </div>
-                    <button
-                      className="button-danger px-3 py-2 text-xs"
-                      disabled={Boolean(trackedJobId) || deletingDocumentId === doc.id}
-                      onClick={async () => {
-                        const confirmed = window.confirm(`Delete ${doc.filename}? This will trigger a rebuild.`);
-                        if (!confirmed) {
-                          return;
-                        }
-
-                        try {
-                          setDeletingDocumentId(doc.id);
-                          const result = await deleteDocument(patient.id, doc.id);
-                          setTrackedJobId(result.job_id);
-                          setTrackedJobTerminal(false);
-                          setActiveJob({
-                            job_id: result.job_id,
-                            patient_id: patient.id,
-                            status: "running",
-                            total: 0,
-                            processed: 0,
-                            current_file: null,
-                            phase: "queued",
-                            phase_started_at: new Date().toISOString(),
-                            started_at: new Date().toISOString(),
-                            completed_at: null,
-                          });
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : "Could not delete document");
-                        } finally {
-                          setDeletingDocumentId(null);
-                        }
-                      }}
-                      type="button"
-                    >
-                      {deletingDocumentId === doc.id ? "Deleting…" : "Delete"}
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : null}

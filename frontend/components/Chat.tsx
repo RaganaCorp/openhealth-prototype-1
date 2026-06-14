@@ -5,6 +5,7 @@ import { marked } from "marked";
 import { useEffect, useRef, useState } from "react";
 
 import { Citation } from "@/components/Citation";
+import { SendIcon } from "@/components/icons";
 import {
   deleteChatSession,
   getMessages,
@@ -27,14 +28,41 @@ type LocalChatMessage = ChatMessage & {
   localSessionId?: string;
 };
 
+// The local model can take 10–60s and the backend pipeline (retrieve → draft →
+// ground-check) has no real-time progress stream, so a bare spinner reads as a
+// hang. Instead we surface the actual sequential stages on an approximate timer
+// plus a live elapsed counter, so the wait feels accountable. We intentionally do
+// NOT stream tokens: the grounding gate can rewrite the answer after generation,
+// and showing an unverified draft that later changes is unsafe for a medical app.
+const THINKING_STAGES = ["Reading the record", "Working through your question", "Checking it against the sources"];
+
 function ThinkingBubble() {
-  // In-flight indicator only. The model's reasoning is persisted on the
-  // assistant message and rendered as a disclosure beneath it once it arrives.
+  const [elapsed, setElapsed] = useState(0);
+  const [stage, setStage] = useState(0);
+
+  useEffect(() => {
+    const startedAt = Date.now();
+    const tick = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    // Advance the stage label on a gentle timer; cap at the last stage so it
+    // never loops or implies more progress than the model has actually made.
+    const advance = window.setInterval(() => setStage((s) => Math.min(s + 1, THINKING_STAGES.length - 1)), 7000);
+    return () => {
+      window.clearInterval(tick);
+      window.clearInterval(advance);
+    };
+  }, []);
+
   return (
     <article className="message-row justify-start">
       <div className="message-bubble message-bubble-assistant">
-        <div className="thinking-dots" aria-label="Thinking">
-          <span /><span /><span />
+        <div className="flex items-center gap-3">
+          <div className="thinking-dots" aria-label="Thinking">
+            <span /><span /><span />
+          </div>
+          <span className="text-xs text-text-secondary" aria-live="polite">
+            {THINKING_STAGES[stage]}
+            {elapsed >= 3 ? ` · ${elapsed}s` : ""}
+          </span>
         </div>
       </div>
     </article>
@@ -49,6 +77,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   const [error, setError] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   // Track which session the refined answer belongs to, so the "Answer was
   // refined" badge can't leak onto an identically-worded message in another
   // session after the user switches views.
@@ -58,6 +87,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
     sessionId: null,
   });
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   // Tracks the session currently in view so a slow response (message load or a
   // long-running send) can't overwrite the view after the user switched sessions.
   const currentSessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -98,6 +128,9 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
 
   useEffect(() => {
     currentSessionIdRef.current = session?.id ?? null;
+    // Clear per-session UI affordances so they never carry over to the next chat.
+    setConfirmingDelete(false);
+    setEditingTitle(false);
     if (!session) {
       // Clear server messages but keep in-flight/failed local messages — they
       // belong to their own sessions and are filtered at render time.
@@ -118,6 +151,16 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
+
+  // Auto-grow the composer from a single line up to a cap, then it scrolls.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) {
+      return;
+    }
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [draft]);
 
   const isDraftSession = !session;
   const sessionTitle = session?.title ?? "New Chat";
@@ -149,9 +192,31 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                   }
                 }}
               >
-                <input className="field-input max-w-md" onChange={(event) => setTitleDraft(event.target.value)} value={titleDraft} />
+                <input
+                  autoFocus
+                  className="field-input max-w-md"
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setTitleDraft(session.title);
+                      setEditingTitle(false);
+                    }
+                  }}
+                  value={titleDraft}
+                />
                 <button className="button-primary px-4 py-2" type="submit">
                   Save
+                </button>
+                <button
+                  className="button-secondary px-4 py-2"
+                  onClick={() => {
+                    setTitleDraft(session.title);
+                    setEditingTitle(false);
+                  }}
+                  type="button"
+                >
+                  Cancel
                 </button>
               </form>
             ) : (
@@ -171,23 +236,36 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             </p>
           </div>
           {session ? (
-            <button
-              className="button-secondary px-3 py-2 text-xs"
-              onClick={async () => {
-                try {
-                  setError(null);
-                  await deleteChatSession(patientId, session.id);
-                  if (onSessionChanged) {
-                    await onSessionChanged();
-                  }
-                } catch (err) {
-                  setError(err instanceof Error ? err.message : "Could not delete chat");
-                }
-              }}
-              type="button"
-            >
-              Delete Chat
-            </button>
+            confirmingDelete ? (
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-xs text-text-secondary">Delete this chat?</span>
+                <button
+                  className="button-danger px-3 py-2 text-xs"
+                  onClick={async () => {
+                    try {
+                      setError(null);
+                      setConfirmingDelete(false);
+                      await deleteChatSession(patientId, session.id);
+                      if (onSessionChanged) {
+                        await onSessionChanged();
+                      }
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "Could not delete chat");
+                    }
+                  }}
+                  type="button"
+                >
+                  Delete
+                </button>
+                <button className="button-secondary px-3 py-2 text-xs" onClick={() => setConfirmingDelete(false)} type="button">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button className="button-secondary shrink-0 px-3 py-2 text-xs" onClick={() => setConfirmingDelete(true)} type="button">
+                Delete Chat
+              </button>
+            )
           ) : null}
         </div>
       </div>
@@ -293,8 +371,24 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
             setRefinedResponse(
               response.grounding_retried ? { sessionId: targetSessionId, content: response.response } : null
             );
-            setMessages((current) => current.filter((m) => m.id !== localUserId));
-            await loadMessages(targetSessionId);
+            // Reconcile in place rather than refetching the whole log: confirm the
+            // optimistic user bubble and append the reply we already received. Both
+            // keep local- ids so a later loadMessages (on a real session switch)
+            // cleanly swaps in the server records — but there's no flash and no
+            // serial refetch storm on the happy path.
+            const assistantTimestamp = new Date().toISOString();
+            setMessages((current) => [
+              ...current.map((m) => (m.id === localUserId ? { ...m, localStatus: undefined } : m)),
+              {
+                id: `local-asst-${Date.now()}`,
+                role: "assistant",
+                content: response.response,
+                citations: response.citations ?? [],
+                thinking: response.thinking ?? null,
+                timestamp: assistantTimestamp,
+                localSessionId: targetSessionId!,
+              },
+            ]);
             if (onSessionChanged) {
               await onSessionChanged();
             }
@@ -323,29 +417,33 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
           }
         }}
       >
-        <label className="field-label" htmlFor="chat-input">
-          Message
-        </label>
-        <div className="mt-2 flex gap-3">
+        <div className="flex items-end gap-3">
           <textarea
-            className="field-input min-h-28 flex-1 resize-none"
-            disabled={loading || Boolean(activeJobId)}
+            aria-label="Message"
+            className="field-input max-h-[200px] flex-1 resize-none overflow-y-auto"
+            disabled={loading}
             id="chat-input"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.ctrlKey && !event.shiftKey && !event.metaKey) {
+              // Enter sends; Shift+Enter inserts a newline (the native default).
+              if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 event.currentTarget.form?.requestSubmit();
-              } else if (event.key === "Enter" && event.ctrlKey) {
-                event.preventDefault();
-                setDraft((d) => d + "\n");
               }
             }}
-            placeholder={activeJobId ? "Wait for ingestion to finish before sending a message." : "What should I understand from the latest lab results?"}
+            placeholder={activeJobId ? "Waiting for ingestion to finish before you can send…" : "Ask a plain-English question about the record…"}
+            ref={textareaRef}
+            rows={1}
             value={draft}
           />
-          <button className="button-primary self-end" disabled={loading || Boolean(activeJobId)} type="submit">
-            {loading ? "Sending..." : "Send"}
+          <button
+            aria-label="Send message"
+            className="button-primary self-end"
+            disabled={loading || Boolean(activeJobId) || !draft.trim()}
+            type="submit"
+          >
+            <SendIcon size={16} />
+            {loading ? "Sending…" : "Send"}
           </button>
         </div>
       </form>

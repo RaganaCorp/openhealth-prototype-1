@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { CloseIcon } from "@/components/icons";
 import { getConfig, getModels, updateConfig, type AppConfig } from "@/lib/api";
 
 type SettingsModalProps = {
@@ -135,7 +136,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             <h2 className="text-2xl font-semibold text-text-primary">Model and ingestion defaults</h2>
           </div>
           <button aria-label="Close settings" className="icon-button" onClick={onClose} type="button">
-            ×
+            <CloseIcon />
           </button>
         </div>
 
