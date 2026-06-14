@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { AddPatientFlow } from "@/components/AddPatientFlow";
-import { ClipboardIcon, CpuIcon, LaptopIcon, PlusIcon, ShieldCheckIcon } from "@/components/icons";
+import { ClipboardIcon, ClockIcon, CpuIcon, LaptopIcon, PlusIcon, ShieldCheckIcon } from "@/components/icons";
 import { formatDate, getPatients, type Patient } from "@/lib/api";
 
 export default function HomePage() {
@@ -115,7 +115,7 @@ export default function HomePage() {
               <div>
                 <p className="text-sm font-semibold text-text-primary">Patient details make answers better</p>
                 <p className="mt-1 text-sm leading-6 text-text-secondary">
-                  Anything you add about a patient — age, conditions, history — also stays on your computer, and helps the AI
+                  Anything you add about a patient (age, conditions, history) also stays on your computer, and helps the AI
                   give more relevant, grounded answers.
                 </p>
               </div>
@@ -127,11 +127,22 @@ export default function HomePage() {
               <div>
                 <p className="text-sm font-semibold text-text-primary">Powered by local AI</p>
                 <p className="mt-1 text-sm leading-6 text-text-secondary">
-                  Answers come from an AI model running on your own hardware through Ollama — no internet connection required.
+                  Answers come from AI models running on your own hardware through Ollama. No internet connection required.
                 </p>
               </div>
             </li>
           </ul>
+
+          <div className="mt-5 flex items-start gap-3 rounded-2xl border border-border/70 bg-surface-elevated/60 p-4">
+            <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-light text-primary">
+              <ClockIcon size={18} />
+            </span>
+            <p className="text-sm leading-6 text-text-secondary">
+              <span className="font-semibold text-text-primary">Worth the wait.</span> Because everything runs on your own
+              computer, replies arrive slower than cloud tools like ChatGPT, and how sharp they are depends on the local models
+              you choose. A little patience is the trade-off for keeping your data private.
+            </p>
+          </div>
         </aside>
       </section>
 
