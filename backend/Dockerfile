@@ -27,6 +27,10 @@ RUN mkdir -p /data && chown -R appuser:appuser /app /data
 
 USER appuser
 
+ENV BACKEND_HOST=0.0.0.0 \
+    BACKEND_PORT=8000 \
+    BACKEND_LOG_LEVEL=info
+
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py"]

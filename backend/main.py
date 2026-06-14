@@ -3,6 +3,7 @@ FastAPI application — all routes.
 """
 
 import asyncio
+import os
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -30,7 +32,6 @@ from config import LOG_PAYLOADS, load_config, patch_config, save_config, Config
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await ai.ensure_ollama_available()
     await watcher.start_watcher()
     yield
     watcher.stop_watcher()
@@ -1114,3 +1115,27 @@ async def list_models():
         return {"models": models}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not reach Ollama: {e}")
+
+
+async def _startup_preflight() -> None:
+    await ai.ensure_ollama_available()
+
+
+def main() -> int:
+    try:
+        asyncio.run(_startup_preflight())
+    except RuntimeError as exc:
+        _logger.error(str(exc))
+        return 1
+
+    uvicorn.run(
+        app,
+        host=os.getenv("BACKEND_HOST", "127.0.0.1"),
+        port=int(os.getenv("BACKEND_PORT", "8000")),
+        log_level=os.getenv("BACKEND_LOG_LEVEL", "debug"),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
