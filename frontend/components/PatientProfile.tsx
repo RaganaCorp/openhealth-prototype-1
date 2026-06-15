@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { CloseIcon } from "@/components/icons";
+import { ModalPortal } from "@/components/ModalPortal";
 import { ConditionsStep } from "@/components/intake/ConditionsStep";
 import { DemographicsStep } from "@/components/intake/DemographicsStep";
 import { LifestyleStep } from "@/components/intake/LifestyleStep";
@@ -246,8 +247,9 @@ function ProfileEditorModal({
   }
 
   return (
-    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
-      <div className="modal-panel flex max-w-2xl flex-col" style={{ overflow: "hidden" }}>
+    <ModalPortal>
+      <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+        <div className="modal-panel flex max-w-2xl flex-col" style={{ overflow: "hidden" }}>
         <div className="flex items-center justify-between gap-3 border-b border-border/80">
           <div className="flex">
             {EDIT_TABS.map((item) => (
@@ -291,8 +293,9 @@ function ProfileEditorModal({
             </button>
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }
 

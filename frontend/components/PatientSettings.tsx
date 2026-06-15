@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { DeletePatientModal } from "@/components/DeletePatientModal";
-import { patchPatient, type Patient } from "@/lib/api";
+import { getConfig, patchPatient, type AppConfig, type Patient } from "@/lib/api";
 
 type PatientSettingsProps = {
   patient: Patient;
@@ -18,6 +18,25 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // Global config supplies the default values shown as placeholders when no
+  // per-patient override is set.
+  const [defaults, setDefaults] = useState<AppConfig | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getConfig()
+      .then((config) => {
+        if (!cancelled) {
+          setDefaults(config);
+        }
+      })
+      .catch(() => {
+        // Non-fatal: fall back to the generic placeholder if config can't load.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <>
@@ -87,7 +106,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
                 className="field-input"
                 min={1}
                 onChange={(event) => setMemoryResultsOverride(event.target.value)}
-                placeholder="Use global default"
+                placeholder={defaults ? `Default: ${defaults.memory_results}` : "Use global default"}
                 step={1}
                 type="number"
                 value={memoryResultsOverride}
@@ -99,7 +118,7 @@ export function PatientSettings({ patient, onPatientSaved, onDeleted }: PatientS
                 className="field-input"
                 min={1}
                 onChange={(event) => setContextWindowOverride(event.target.value)}
-                placeholder="Use global default"
+                placeholder={defaults ? `Default: ${defaults.context_window_tokens.toLocaleString()}` : "Use global default"}
                 step={1}
                 type="number"
                 value={contextWindowOverride}

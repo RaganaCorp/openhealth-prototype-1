@@ -6,12 +6,13 @@ import { startTransition, useEffect, useRef, useState } from "react";
 
 import { AddPatientFlow } from "@/components/AddPatientFlow";
 import { Chat } from "@/components/Chat";
-import { GearIcon, PlusIcon } from "@/components/icons";
+import { GearIcon, PlusIcon, TrashIcon } from "@/components/icons";
 import { IngestionProgress } from "@/components/IngestionProgress";
 import { PatientProfile } from "@/components/PatientProfile";
 import { UploadArea } from "@/components/UploadArea";
 import {
   createChatSession,
+  deleteChatSession,
   deleteDocument,
   formatDate,
   getActiveJob,
@@ -81,6 +82,31 @@ export default function PatientPage() {
       return;
     }
     setDocuments(documentsData);
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    if (!window.confirm("Delete this chat? This cannot be undone.")) {
+      return;
+    }
+    try {
+      setActionError(null);
+      await deleteChatSession(patientId, sessionId);
+      const remaining = await refreshSidebar();
+      // If the open chat was deleted, fall back to the most recent remaining
+      // session, or a fresh draft chat if none are left.
+      if (sessionId === selectedSessionId) {
+        const next = [...remaining].sort((a, b) => {
+          const aTime = a.last_message_at ?? a.created_at ?? "";
+          const bTime = b.last_message_at ?? b.created_at ?? "";
+          return bTime.localeCompare(aTime);
+        })[0];
+        startTransition(() => {
+          router.replace(next ? `/patient/${patientId}?session=${next.id}` : `/patient/${patientId}?session=new`);
+        });
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Could not delete chat");
+    }
   }
 
   async function loadPage() {
@@ -242,19 +268,31 @@ export default function PatientPage() {
                 const bTime = b.last_message_at ?? b.created_at ?? "";
                 return bTime.localeCompare(aTime);
               }).map((session) => (
-                <button
-                  className={`session-tile ${session.id === activeSession?.id ? "session-tile-active" : ""}`}
+                <div
+                  className={`session-tile group relative ${session.id === activeSession?.id ? "session-tile-active" : ""}`}
                   key={session.id}
-                  onClick={() => {
-                    startTransition(() => {
-                      router.push(`/patient/${patient.id}?session=${session.id}`);
-                    });
-                  }}
-                  type="button"
                 >
-                  <span className="block truncate text-sm font-medium">{session.title}</span>
-                  <span className="mt-1 block text-xs text-text-secondary">{formatDate(session.last_message_at ?? session.created_at)}</span>
-                </button>
+                  <button
+                    className="block w-full pr-7 text-left"
+                    onClick={() => {
+                      startTransition(() => {
+                        router.push(`/patient/${patient.id}?session=${session.id}`);
+                      });
+                    }}
+                    type="button"
+                  >
+                    <span className="block truncate text-sm font-medium">{session.title}</span>
+                    <span className="mt-1 block text-xs text-text-secondary">{formatDate(session.last_message_at ?? session.created_at)}</span>
+                  </button>
+                  <button
+                    aria-label="Delete chat"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-text-muted opacity-0 transition-opacity hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
+                    onClick={() => void handleDeleteSession(session.id)}
+                    type="button"
+                  >
+                    <TrashIcon size={15} />
+                  </button>
+                </div>
               ))}
             </div>
           </div>

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { CloseIcon } from "@/components/icons";
+import { ModalPortal } from "@/components/ModalPortal";
 import { getConfig, getModels, updateConfig, type AppConfig } from "@/lib/api";
 import { useModalDismiss } from "@/lib/useModalDismiss";
 
@@ -131,8 +132,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   };
 
   return (
-    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
-      <div className="modal-panel">
+    <ModalPortal>
+      <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+        <div className="modal-panel">
         <div className="flex items-start justify-between gap-4 border-b border-border/80 pb-4">
           <div>
             <p className="eyebrow">Global Settings</p>
@@ -364,7 +366,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             </div>
           </form>
         ) : null}
+        </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }

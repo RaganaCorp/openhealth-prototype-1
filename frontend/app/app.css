@@ -505,7 +505,6 @@ select {
   justify-content: center;
   align-items: flex-start;
   padding: 2.5rem 1rem 1rem;
-  border-radius: 8px;
   background: color-mix(in srgb, var(--color-text-primary) 18%, transparent);
   backdrop-filter: blur(8px);
 }

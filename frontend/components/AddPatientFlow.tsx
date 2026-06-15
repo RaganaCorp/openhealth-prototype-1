@@ -16,6 +16,7 @@ import {
   type SocialHistoryDraft,
 } from "@/components/intake/types";
 import { IngestionProgress } from "@/components/IngestionProgress";
+import { ModalPortal } from "@/components/ModalPortal";
 import { UploadArea } from "@/components/UploadArea";
 import { createPatient, type Patient, type PatientCondition } from "@/lib/api";
 import { useModalDismiss } from "@/lib/useModalDismiss";
@@ -128,8 +129,9 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
   const stepIndex = { name: 0, demographics: 1, lifestyle: 2, conditions: 3, documents: 4, processing: 4 }[step];
 
   return (
-    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
-      <div className="modal-panel max-w-2xl">
+    <ModalPortal>
+      <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+        <div className="modal-panel max-w-2xl">
         {step !== "processing" ? (
           <div className="wizard-progress" aria-hidden>
             {[0, 1, 2, 3, 4].map((index) => (
@@ -288,7 +290,8 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
             </div>
           </div>
         ) : null}
+        </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }

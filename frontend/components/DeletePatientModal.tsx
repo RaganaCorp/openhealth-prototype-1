@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { ModalPortal } from "@/components/ModalPortal";
 import { deletePatient } from "@/lib/api";
 import { useModalDismiss } from "@/lib/useModalDismiss";
 
@@ -29,8 +30,9 @@ export function DeletePatientModal({ open, patientId, patientName, onClose, onDe
   }
 
   return (
-    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
-      <div className="modal-panel max-w-xl">
+    <ModalPortal>
+      <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+        <div className="modal-panel max-w-xl">
         <p className="eyebrow">Delete Patient</p>
         <h2 className="mt-2 text-2xl font-semibold text-text-primary">Remove {patientName} data</h2>
         <p className="mt-3 text-sm leading-6 text-text-secondary">Choose what should be removed. All options start enabled to match the backend defaults.</p>
@@ -80,7 +82,8 @@ export function DeletePatientModal({ open, patientId, patientName, onClose, onDe
             {submitting ? "Deleting…" : "Delete patient"}
           </button>
         </div>
+        </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 }

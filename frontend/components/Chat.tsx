@@ -5,9 +5,8 @@ import { marked } from "marked";
 import { useEffect, useRef, useState } from "react";
 
 import { Citation } from "@/components/Citation";
-import { SendIcon } from "@/components/icons";
+import { PencilIcon, SendIcon } from "@/components/icons";
 import {
-  deleteChatSession,
   getMessages,
   renameChatSession,
   sendChat,
@@ -77,7 +76,6 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   const [error, setError] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   // Track which session the refined answer belongs to, so the "Answer was
   // refined" badge can't leak onto an identically-worded message in another
   // session after the user switches views.
@@ -129,7 +127,6 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
   useEffect(() => {
     currentSessionIdRef.current = session?.id ?? null;
     // Clear per-session UI affordances so they never carry over to the next chat.
-    setConfirmingDelete(false);
     setEditingTitle(false);
     if (!session) {
       // Clear server messages but keep in-flight/failed local messages — they
@@ -159,7 +156,11 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
       return;
     }
     el.style.height = "auto";
+    const capped = el.scrollHeight > 200;
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    // Only show the scrollbar once the composer hits its max height; otherwise a
+    // sub-pixel overflow leaves a tiny scrollbar that barely scrolls.
+    el.style.overflowY = capped ? "auto" : "hidden";
   }, [draft]);
 
   const isDraftSession = !session;
@@ -220,11 +221,16 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                 </button>
               </form>
             ) : (
-              <div className="flex items-center gap-3">
+              <div className="group flex items-center gap-2">
                 <h2 className="truncate text-2xl font-semibold text-text-primary">{sessionTitle}</h2>
-                {session ? (
-                  <button className="button-secondary px-3 py-2 text-xs" onClick={() => setEditingTitle(true)} type="button">
-                    Rename
+                {session && !session.title_auto_generated ? (
+                  <button
+                    aria-label="Rename chat"
+                    className="shrink-0 rounded-md p-1.5 text-text-muted opacity-0 transition-opacity hover:text-primary focus-visible:opacity-100 group-hover:opacity-100"
+                    onClick={() => setEditingTitle(true)}
+                    type="button"
+                  >
+                    <PencilIcon size={16} />
                   </button>
                 ) : null}
               </div>
@@ -235,38 +241,6 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
                 : "Ask grounded questions about the uploaded record. Citations stay attached to each assistant response."}
             </p>
           </div>
-          {session ? (
-            confirmingDelete ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="text-xs text-text-secondary">Delete this chat?</span>
-                <button
-                  className="button-danger px-3 py-2 text-xs"
-                  onClick={async () => {
-                    try {
-                      setError(null);
-                      setConfirmingDelete(false);
-                      await deleteChatSession(patientId, session.id);
-                      if (onSessionChanged) {
-                        await onSessionChanged();
-                      }
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : "Could not delete chat");
-                    }
-                  }}
-                  type="button"
-                >
-                  Delete
-                </button>
-                <button className="button-secondary px-3 py-2 text-xs" onClick={() => setConfirmingDelete(false)} type="button">
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button className="button-secondary shrink-0 px-3 py-2 text-xs" onClick={() => setConfirmingDelete(true)} type="button">
-                Delete Chat
-              </button>
-            )
-          ) : null}
         </div>
       </div>
 
@@ -420,7 +394,7 @@ export function Chat({ patientId, session, activeJobId, onCreateSession, onSessi
         <div className="flex items-end gap-3">
           <textarea
             aria-label="Message"
-            className="field-input max-h-[200px] flex-1 resize-none overflow-y-auto"
+            className="field-input max-h-[200px] flex-1 resize-none overflow-y-hidden"
             disabled={loading}
             id="chat-input"
             onChange={(event) => setDraft(event.target.value)}
