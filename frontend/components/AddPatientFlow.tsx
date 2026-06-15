@@ -18,6 +18,7 @@ import {
 import { IngestionProgress } from "@/components/IngestionProgress";
 import { UploadArea } from "@/components/UploadArea";
 import { createPatient, type Patient, type PatientCondition } from "@/lib/api";
+import { useModalDismiss } from "@/lib/useModalDismiss";
 
 type AddPatientFlowProps = {
   open: boolean;
@@ -54,6 +55,9 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, name, demographics, social, conditions, patient]);
+
+  // `dismiss` is a hoisted function declaration below; safe to reference here.
+  const overlayDismiss = useModalDismiss(dismiss);
 
   if (!open) {
     return null;
@@ -124,8 +128,8 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
   const stepIndex = { name: 0, demographics: 1, lifestyle: 2, conditions: 3, documents: 4, processing: 4 }[step];
 
   return (
-    <div className="modal-overlay" onClick={dismiss} role="presentation">
-      <div className="modal-panel max-w-2xl" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+      <div className="modal-panel max-w-2xl">
         {step !== "processing" ? (
           <div className="wizard-progress" aria-hidden>
             {[0, 1, 2, 3, 4].map((index) => (
@@ -148,8 +152,7 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
               <p className="eyebrow">Add Patient</p>
               <h2 className="text-2xl font-semibold text-text-primary">Create a new patient workspace</h2>
               <p className="mt-2 text-sm leading-6 text-text-secondary">
-                A name is all you need to start. Add demographics and conditions now if you like, or skip straight to
-                uploading documents.
+                A name is all you need to start.
               </p>
             </div>
             <label className="field-group">
@@ -163,23 +166,13 @@ export function AddPatientFlow({ open, onClose, onComplete }: AddPatientFlowProp
               />
             </label>
             {error ? <div className="status-error">{error}</div> : null}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <button
-                className="button-secondary"
-                disabled={!name.trim() || submitting}
-                onClick={createWorkspace}
-                type="button"
-              >
-                {submitting ? "Creating…" : "Skip details & add documents"}
+            <div className="flex justify-end gap-3">
+              <button className="button-secondary" onClick={dismiss} type="button">
+                Cancel
               </button>
-              <div className="flex justify-end gap-3">
-                <button className="button-secondary" onClick={dismiss} type="button">
-                  Cancel
-                </button>
-                <button className="button-primary" disabled={!name.trim() || submitting} type="submit">
-                  Continue
-                </button>
-              </div>
+              <button className="button-primary" disabled={!name.trim()} type="submit">
+                Continue
+              </button>
             </div>
           </form>
         ) : null}

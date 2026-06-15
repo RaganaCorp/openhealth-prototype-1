@@ -175,55 +175,54 @@ export default function PatientPage() {
       <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
         <aside className="panel-card panel-scroll h-[calc(100vh-8.75rem)] animate-fade-up">
           <div className="flex items-center justify-between">
-            <p className="eyebrow">Patients</p>
-            <button aria-label="Add patient" className="icon-button" onClick={() => setAddOpen(true)} type="button">
-              <PlusIcon />
+            <p className="eyebrow eyebrow-lg">Patients</p>
+            <button
+              className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary-light"
+              onClick={() => setAddOpen(true)}
+              type="button"
+            >
+              <PlusIcon size={13} />
+              Add Patient
             </button>
           </div>
 
-          <div className="mt-4 space-y-2">
-            {patients.map((item) => {
-              const isActive = item.id === patient.id;
-              const meta = (
-                <>
-                  <span className="block truncate text-sm font-medium text-text-primary">{item.name}</span>
-                  <span className="mt-0.5 block text-xs text-text-secondary">
-                    {item.document_count} docs · {formatDate(item.last_ingested_at)}
-                  </span>
-                </>
-              );
-              if (isActive) {
-                return (
-                  <div className="patient-tile patient-tile-active" key={item.id}>
-                    <div className="min-w-0 flex-1">{meta}</div>
-                    <Link aria-label="Patient settings" className="icon-button h-9 w-9 shrink-0" href={`/patient/${patient.id}/settings`}>
-                      <GearIcon size={16} />
-                    </Link>
-                  </div>
-                );
-              }
-              return (
-                <button
-                  className="patient-tile"
-                  key={item.id}
-                  onClick={() => {
-                    startTransition(() => {
-                      router.push(`/patient/${item.id}`);
-                    });
-                  }}
-                  type="button"
-                >
-                  <div className="min-w-0 flex-1">{meta}</div>
-                </button>
-              );
-            })}
+          <div className="mt-4 flex items-center gap-1.5">
+            <select
+              aria-label="Select patient"
+              className="field-input field-sm min-w-0 flex-1"
+              onChange={(event) => {
+                const nextId = event.target.value;
+                if (nextId !== patient.id) {
+                  startTransition(() => {
+                    router.push(`/patient/${nextId}`);
+                  });
+                }
+              }}
+              value={patient.id}
+            >
+              {patients.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+            <Link
+              aria-label="Patient settings"
+              className="shrink-0 rounded-lg p-1.5 text-text-muted transition-colors hover:text-primary"
+              href={`/patient/${patient.id}/settings`}
+            >
+              <GearIcon size={18} />
+            </Link>
           </div>
+          <p className="mt-2 text-xs text-text-secondary">
+            {patient.document_count} docs · {formatDate(patient.last_ingested_at)}
+          </p>
 
           <div className="mt-6 border-t border-border/80 pt-5">
             <div className="flex items-center justify-between">
-              <p className="eyebrow">Chats</p>
+              <p className="eyebrow eyebrow-lg">Chats</p>
               <button
-                className="button-secondary whitespace-nowrap px-4 py-2 text-sm"
+                className="inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-[10px] font-medium text-primary transition-colors hover:bg-primary-light"
                 onClick={() => {
                   setActiveTab("chat");
                   startTransition(() => {
@@ -232,6 +231,7 @@ export default function PatientPage() {
                 }}
                 type="button"
               >
+                <PlusIcon size={13} />
                 New chat
               </button>
             </div>

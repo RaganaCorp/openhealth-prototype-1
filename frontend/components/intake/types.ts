@@ -79,7 +79,6 @@ export type SocialHistoryDraft = {
   drugStatus: NonNullable<SocialHistory["drug_status"]> | "";
   drugSubstances: string;
   sexualActivityStatus: NonNullable<SocialHistory["sexual_activity_status"]> | "";
-  sexualPartners: string;
   sexualPartnerGenders: string;
   sexualProtection: NonNullable<SocialHistory["sexual_protection"]> | "";
 };
@@ -92,7 +91,6 @@ export const emptySocialHistory: SocialHistoryDraft = {
   drugStatus: "",
   drugSubstances: "",
   sexualActivityStatus: "",
-  sexualPartners: "",
   sexualPartnerGenders: "",
   sexualProtection: "",
 };
@@ -121,7 +119,6 @@ export function draftToSocialHistory(s: SocialHistoryDraft): SocialHistory | nul
     drug_status: s.drugStatus || null,
     drug_substances: drugKeepsSubstances ? s.drugSubstances.trim() || null : null,
     sexual_activity_status: s.sexualActivityStatus || null,
-    sexual_partners: sexualActive ? s.sexualPartners.trim() || null : null,
     sexual_partner_genders: sexualActive ? s.sexualPartnerGenders.trim() || null : null,
     sexual_protection: sexualActive ? s.sexualProtection || null : null,
   };
@@ -190,7 +187,6 @@ export function socialHistoryFromProfile(social: SocialHistory | null | undefine
     drugStatus: social.drug_status ?? "",
     drugSubstances: social.drug_substances ?? "",
     sexualActivityStatus: social.sexual_activity_status ?? "",
-    sexualPartners: social.sexual_partners ?? "",
     sexualPartnerGenders: social.sexual_partner_genders ?? "",
     sexualProtection: social.sexual_protection ?? "",
   };

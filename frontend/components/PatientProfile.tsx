@@ -76,7 +76,6 @@ function socialRows(social: SocialHistory): { label: string; value: string | nul
     social.sexual_activity_status === "active"
       ? [
           "Active",
-          social.sexual_partners ? `partners: ${social.sexual_partners}` : null,
           social.sexual_partner_genders ? `gender(s): ${social.sexual_partner_genders}` : null,
           social.sexual_protection ? `protection: ${social.sexual_protection}` : null,
         ]

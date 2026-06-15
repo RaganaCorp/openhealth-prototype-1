@@ -1,5 +1,8 @@
 "use client";
 
+import { useState, type ReactNode } from "react";
+
+import { InfoIcon } from "@/components/icons";
 import type { SocialHistoryDraft } from "./types";
 
 type LifestyleStepProps = {
@@ -15,16 +18,19 @@ function ChipGroup<T extends string>({
   options,
   selected,
   onSelect,
+  trailing,
 }: {
   legend: string;
   options: Option<T>[];
   selected: T | "";
   onSelect: (value: T | "") => void;
+  // Optional content rendered inline after the chips (e.g. a dependent input).
+  trailing?: ReactNode;
 }) {
   return (
     <fieldset className="field-group">
       <legend className="field-label">{legend}</legend>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {options.map((option) => {
           const active = selected === option.value;
           return (
@@ -40,12 +46,15 @@ function ChipGroup<T extends string>({
             </button>
           );
         })}
+        {trailing}
       </div>
     </fieldset>
   );
 }
 
 export function LifestyleStep({ patientName, value, onChange }: LifestyleStepProps) {
+  const [whyOpen, setWhyOpen] = useState(false);
+
   function patch(updates: Partial<SocialHistoryDraft>) {
     onChange({ ...value, ...updates });
   }
@@ -72,7 +81,7 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
     const keepsDetails = status === "active";
     patch({
       sexualActivityStatus: status,
-      ...(keepsDetails ? {} : { sexualPartners: "", sexualPartnerGenders: "", sexualProtection: "" }),
+      ...(keepsDetails ? {} : { sexualPartnerGenders: "", sexualProtection: "" }),
     });
   }
 
@@ -81,11 +90,31 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
   return (
     <div className="space-y-5">
       <div className="border-b border-border/80 pb-4">
-        <p className="eyebrow">Lifestyle &amp; social history</p>
-        <h2 className="text-2xl font-semibold text-text-primary">Habits that affect {displayName}&rsquo;s care</h2>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="eyebrow">Lifestyle &amp; social history</p>
+            <h2 className="text-2xl font-semibold text-text-primary">Habits that affect {displayName}&rsquo;s care</h2>
+          </div>
+          <button
+            aria-expanded={whyOpen}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
+            onClick={() => setWhyOpen((open) => !open)}
+            type="button"
+          >
+            <InfoIcon size={14} />
+            Why we&apos;re asking
+          </button>
+        </div>
         <p className="mt-2 text-sm leading-6 text-text-secondary">
           These can change clinical recommendations. All optional — share what&rsquo;s relevant.
         </p>
+        {whyOpen ? (
+          <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
+            Lifestyle and social factors change how the record should be read — tobacco, alcohol, and drug use affect risk,
+            likely diagnoses, medication choices, and screening guidance. Sharing what&rsquo;s relevant helps the local AI give
+            safer, more grounded answers. It stays on your computer and you can change it anytime.
+          </div>
+        ) : null}
       </div>
 
       {/* Tobacco */}
@@ -112,33 +141,33 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
       </div>
 
       {/* Alcohol */}
-      <div className="space-y-3">
-        <ChipGroup
-          legend="Alcohol use"
-          onSelect={setAlcoholStatus}
-          options={[
-            { value: "never", label: "Never" },
-            { value: "occasional", label: "Occasional" },
-            { value: "moderate", label: "Moderate" },
-            { value: "heavy", label: "Heavy" },
-          ]}
-          selected={value.alcoholStatus}
-        />
-        {value.alcoholStatus && value.alcoholStatus !== "never" ? (
-          <label className="flex items-center gap-2">
-            <input
-              className="field-input w-28"
-              inputMode="numeric"
-              min={0}
-              onChange={(event) => patch({ alcoholDrinksPerWeek: event.target.value })}
-              placeholder="0"
-              type="number"
-              value={value.alcoholDrinksPerWeek}
-            />
-            <span className="text-sm text-text-secondary">drinks / week</span>
-          </label>
-        ) : null}
-      </div>
+      <ChipGroup
+        legend="Alcohol use"
+        onSelect={setAlcoholStatus}
+        options={[
+          { value: "never", label: "Never" },
+          { value: "occasional", label: "Occasional" },
+          { value: "moderate", label: "Moderate" },
+          { value: "heavy", label: "Heavy" },
+        ]}
+        selected={value.alcoholStatus}
+        trailing={
+          value.alcoholStatus && value.alcoholStatus !== "never" ? (
+            <label className="ml-1 flex items-center gap-2">
+              <input
+                className="field-input field-num"
+                inputMode="numeric"
+                min={0}
+                onChange={(event) => patch({ alcoholDrinksPerWeek: event.target.value })}
+                placeholder="0"
+                type="number"
+                value={value.alcoholDrinksPerWeek}
+              />
+              <span className="text-sm text-text-secondary">drinks / week</span>
+            </label>
+          ) : null
+        }
+      />
 
       {/* Recreational drugs */}
       <div className="space-y-3">
@@ -175,26 +204,17 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
           selected={value.sexualActivityStatus}
         />
         {value.sexualActivityStatus === "active" ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="field-group">
-              <span className="field-label">Partners</span>
-              <input
-                className="field-input"
-                onChange={(event) => patch({ sexualPartners: event.target.value })}
-                placeholder="e.g. 1, multiple"
-                value={value.sexualPartners}
-              />
-            </label>
+          <div className="space-y-3">
             <label className="field-group">
               <span className="field-label">Partner gender(s)</span>
               <input
-                className="field-input"
+                className="field-input sm:max-w-xs"
                 onChange={(event) => patch({ sexualPartnerGenders: event.target.value })}
                 placeholder="e.g. men, women"
                 value={value.sexualPartnerGenders}
               />
             </label>
-            <fieldset className="field-group sm:col-span-2">
+            <fieldset className="field-group">
               <legend className="field-label">Protection / contraception</legend>
               <div className="flex flex-wrap gap-2">
                 {(["always", "sometimes", "never"] as const).map((option) => {

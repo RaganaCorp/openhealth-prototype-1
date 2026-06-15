@@ -1,5 +1,8 @@
 "use client";
 
+import { useState } from "react";
+
+import { InfoIcon } from "@/components/icons";
 import type { SexAssignedAtBirth } from "@/lib/api";
 import {
   cmToFeetInches,
@@ -24,17 +27,13 @@ const SEX_OPTIONS: { value: SexAssignedAtBirth; label: string }[] = [
   { value: "undisclosed", label: "Prefer not to say" },
 ];
 
-// Weight slider bounds, expressed per display unit.
-const WEIGHT_RANGE = {
-  lbs: { min: 1, max: 660, step: 1 },
-  kg: { min: 1, max: 300, step: 1 },
-};
-
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
 export function DemographicsStep({ patientName, value, onChange }: DemographicsStepProps) {
+  const [whyOpen, setWhyOpen] = useState(false);
+
   function patch(updates: Partial<DemographicsDraft>) {
     onChange({ ...value, ...updates });
   }
@@ -72,25 +71,60 @@ export function DemographicsStep({ patientName, value, onChange }: DemographicsS
     patch({ weightUnit: unit, weightValue: nextValue });
   }
 
-  const weightRange = WEIGHT_RANGE[value.weightUnit];
-  const weightNumber = Number(value.weightValue);
-  const sliderValue = Number.isFinite(weightNumber) && weightNumber > 0 ? weightNumber : weightRange.min;
+  // Reference figures (rough adult medians) used only as placeholders, to hint the
+  // expected format once sex is known. cm/kg derive from the imperial values.
+  const sexDefaults =
+    value.sex === "male"
+      ? { feet: 5, inches: 8, lbs: 172 }
+      : value.sex === "female"
+        ? { feet: 5, inches: 3, lbs: 155 }
+        : null;
+  const heightFeetPlaceholder = sexDefaults ? String(sexDefaults.feet) : "5";
+  const heightInchesPlaceholder = sexDefaults ? String(sexDefaults.inches) : "9";
+  const heightCmPlaceholder = sexDefaults
+    ? String(Math.round(feetInchesToCm(sexDefaults.feet, sexDefaults.inches)))
+    : "175";
+  const weightPlaceholder = sexDefaults
+    ? value.weightUnit === "kg"
+      ? String(Math.round(lbsToKg(sexDefaults.lbs)))
+      : String(sexDefaults.lbs)
+    : "0";
 
   return (
     <div className="space-y-5">
       <div className="border-b border-border/80 pb-4">
-        <p className="eyebrow">Demographics</p>
-        <h2 className="text-2xl font-semibold text-text-primary">Tell us about {patientName || "this patient"}</h2>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="eyebrow">Demographics</p>
+            <h2 className="text-2xl font-semibold text-text-primary">Tell us about {patientName || "this patient"}</h2>
+          </div>
+          <button
+            aria-expanded={whyOpen}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
+            onClick={() => setWhyOpen((open) => !open)}
+            type="button"
+          >
+            <InfoIcon size={14} />
+            Why we&apos;re asking
+          </button>
+        </div>
         <p className="mt-2 text-sm leading-6 text-text-secondary">
           Everything here is optional — add what you know and skip the rest.
         </p>
+        {whyOpen ? (
+          <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
+            These details give the local AI medical context for the record. Age, sex, and body measurements shift what counts
+            as normal — lab reference ranges, medication dosing, and risk factors are all read against them — so sharing what
+            you know leads to more accurate, grounded answers. It stays on your computer and you can change it anytime.
+          </div>
+        ) : null}
       </div>
 
       <label className="field-group">
         <span className="field-label">Date of birth</span>
         <input
           autoFocus
-          className="field-input"
+          className={`field-input ${value.dob ? "is-filled" : ""}`}
           max={todayIso()}
           onChange={(event) => patch({ dob: event.target.value })}
           type="date"
@@ -119,125 +153,111 @@ export function DemographicsStep({ patientName, value, onChange }: DemographicsS
       </fieldset>
 
       <label className="field-group">
-        <span className="field-label">Gender identity (optional)</span>
+        <span className="field-label">Gender identity</span>
         <input
-          className="field-input"
+          className={`field-input ${value.genderIdentity.trim() ? "is-filled" : ""}`}
           onChange={(event) => patch({ genderIdentity: event.target.value })}
           placeholder="How do they identify?"
           value={value.genderIdentity}
         />
       </label>
 
-      <div className="field-group">
-        <div className="flex items-center justify-between">
-          <span className="field-label">Height (optional)</span>
-          <div className="unit-toggle" role="group" aria-label="Height unit">
-            <button
-              aria-pressed={value.heightUnit === "ftin"}
-              className={`unit-toggle-button ${value.heightUnit === "ftin" ? "active" : ""}`}
-              onClick={() => setHeightUnit("ftin")}
-              type="button"
-            >
-              ft / in
-            </button>
-            <button
-              aria-pressed={value.heightUnit === "cm"}
-              className={`unit-toggle-button ${value.heightUnit === "cm" ? "active" : ""}`}
-              onClick={() => setHeightUnit("cm")}
-              type="button"
-            >
-              cm
-            </button>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <div className="field-group">
+          <span className="field-label">Height</span>
+          <div className="flex flex-wrap items-center gap-2">
+            {value.heightUnit === "ftin" ? (
+              <>
+                <label className="flex items-center gap-1.5">
+                  <input
+                    className="field-input field-num-xs"
+                    inputMode="numeric"
+                    min={0}
+                    onChange={(event) => patch({ heightFeet: event.target.value })}
+                    placeholder={heightFeetPlaceholder}
+                    type="number"
+                    value={value.heightFeet}
+                  />
+                  <span className="text-sm text-text-secondary">ft</span>
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <input
+                    className="field-input field-num-xs"
+                    inputMode="numeric"
+                    max={11}
+                    min={0}
+                    onChange={(event) => patch({ heightInches: event.target.value })}
+                    placeholder={heightInchesPlaceholder}
+                    type="number"
+                    value={value.heightInches}
+                  />
+                  <span className="text-sm text-text-secondary">in</span>
+                </label>
+              </>
+            ) : (
+              <input
+                aria-label="Height in cm"
+                className="field-input field-num"
+                inputMode="numeric"
+                min={0}
+                onChange={(event) => patch({ heightCm: event.target.value })}
+                placeholder={heightCmPlaceholder}
+                type="number"
+                value={value.heightCm}
+              />
+            )}
+            <div className="unit-toggle" role="group" aria-label="Height unit">
+              <button
+                aria-pressed={value.heightUnit === "ftin"}
+                className={`unit-toggle-button ${value.heightUnit === "ftin" ? "active" : ""}`}
+                onClick={() => setHeightUnit("ftin")}
+                type="button"
+              >
+                ft / in
+              </button>
+              <button
+                aria-pressed={value.heightUnit === "cm"}
+                className={`unit-toggle-button ${value.heightUnit === "cm" ? "active" : ""}`}
+                onClick={() => setHeightUnit("cm")}
+                type="button"
+              >
+                cm
+              </button>
+            </div>
           </div>
         </div>
-        {value.heightUnit === "ftin" ? (
-          <div className="grid grid-cols-2 gap-3">
-            <label className="flex items-center gap-2">
-              <input
-                className="field-input"
-                inputMode="numeric"
-                min={0}
-                onChange={(event) => patch({ heightFeet: event.target.value })}
-                placeholder="5"
-                type="number"
-                value={value.heightFeet}
-              />
-              <span className="text-sm text-text-secondary">ft</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                className="field-input"
-                inputMode="numeric"
-                max={11}
-                min={0}
-                onChange={(event) => patch({ heightInches: event.target.value })}
-                placeholder="9"
-                type="number"
-                value={value.heightInches}
-              />
-              <span className="text-sm text-text-secondary">in</span>
-            </label>
-          </div>
-        ) : (
-          <label className="flex items-center gap-2">
-            <input
-              className="field-input"
-              inputMode="numeric"
-              min={0}
-              onChange={(event) => patch({ heightCm: event.target.value })}
-              placeholder="175"
-              type="number"
-              value={value.heightCm}
-            />
-            <span className="text-sm text-text-secondary">cm</span>
-          </label>
-        )}
-      </div>
 
-      <div className="field-group">
-        <div className="flex items-center justify-between">
-          <span className="field-label">Weight (optional)</span>
-          <div className="unit-toggle" role="group" aria-label="Weight unit">
-            <button
-              aria-pressed={value.weightUnit === "lbs"}
-              className={`unit-toggle-button ${value.weightUnit === "lbs" ? "active" : ""}`}
-              onClick={() => setWeightUnit("lbs")}
-              type="button"
-            >
-              lbs
-            </button>
-            <button
-              aria-pressed={value.weightUnit === "kg"}
-              className={`unit-toggle-button ${value.weightUnit === "kg" ? "active" : ""}`}
-              onClick={() => setWeightUnit("kg")}
-              type="button"
-            >
-              kg
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center gap-4">
-          <input
-            aria-label={`Weight in ${value.weightUnit}`}
-            className="flex-1"
-            max={weightRange.max}
-            min={weightRange.min}
-            onChange={(event) => patch({ weightValue: event.target.value })}
-            step={weightRange.step}
-            type="range"
-            value={sliderValue}
-          />
-          <div className="flex items-center gap-2">
+        <div className="field-group">
+          <span className="field-label">Weight</span>
+          <div className="flex flex-wrap items-center gap-2">
             <input
-              className="field-input w-24"
+              aria-label={`Weight in ${value.weightUnit}`}
+              className="field-input field-num"
               inputMode="numeric"
               min={0}
               onChange={(event) => patch({ weightValue: event.target.value })}
-              placeholder="0"
+              placeholder={weightPlaceholder}
               type="number"
               value={value.weightValue}
             />
-            <span className="text-sm text-text-secondary">{value.weightUnit}</span>
+            <div className="unit-toggle" role="group" aria-label="Weight unit">
+              <button
+                aria-pressed={value.weightUnit === "lbs"}
+                className={`unit-toggle-button ${value.weightUnit === "lbs" ? "active" : ""}`}
+                onClick={() => setWeightUnit("lbs")}
+                type="button"
+              >
+                lbs
+              </button>
+              <button
+                aria-pressed={value.weightUnit === "kg"}
+                className={`unit-toggle-button ${value.weightUnit === "kg" ? "active" : ""}`}
+                onClick={() => setWeightUnit("kg")}
+                type="button"
+              >
+                kg
+              </button>
+            </div>
           </div>
         </div>
       </div>

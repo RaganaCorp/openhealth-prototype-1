@@ -59,7 +59,7 @@ export default function HomePage() {
 
             {patients.map((patient, index) => (
               <article
-                className="group animate-fade-up rounded-[24px] border border-border/80 bg-surface p-5 shadow-lg shadow-black/5 transition-transform duration-300 hover:-translate-y-0.5"
+                className="group animate-fade-up rounded-2xl border border-border/80 bg-surface p-5 shadow-lg shadow-black/5 transition-transform duration-300 hover:-translate-y-0.5"
                 key={patient.id}
                 style={{ animationDelay: `${index * 120}ms` }}
               >

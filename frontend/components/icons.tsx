@@ -123,3 +123,124 @@ export function ClockIcon(props: IconProps) {
     </svg>
   );
 }
+
+export function InfoIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 16v-4M12 8h.01" />
+    </svg>
+  );
+}
+
+// --- Health-condition category icons ---
+
+export function HeartIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z" />
+    </svg>
+  );
+}
+
+export function FlaskIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M9 2.5h6" />
+      <path d="M10.5 2.5v6.4a2 2 0 0 1-.34 1.11l-4.32 6.48A2 2 0 0 0 7.5 19.5h9a2 2 0 0 0 1.66-3.01l-4.32-6.48a2 2 0 0 1-.34-1.11V2.5" />
+      <path d="M8 15h8" />
+    </svg>
+  );
+}
+
+export function BrainIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 5a3 3 0 1 0-5.997.142 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+      <path d="M12 5a3 3 0 1 1 5.997.142 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+    </svg>
+  );
+}
+
+export function WindIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12.8 19.6A2 2 0 1 0 14 16H2" />
+      <path d="M17.5 8A2.5 2.5 0 1 1 19.5 12H2" />
+      <path d="M9.8 4.4A2 2 0 1 1 11 8H2" />
+    </svg>
+  );
+}
+
+export function AppleIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06z" />
+      <path d="M10 2c1 .5 2 2 2 5" />
+    </svg>
+  );
+}
+
+export function DropletIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C8 11.1 7 13 7 15a7 7 0 0 0 7 7z" />
+    </svg>
+  );
+}
+
+export function BoneIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M17 10c.7-.7 1.69 0 2.5 0a2.5 2.5 0 1 0 0-5 .5.5 0 0 1-.5-.5 2.5 2.5 0 1 0-5 0c0 .81.7 1.8 0 2.5l-7 7c-.7.7-1.69 0-2.5 0a2.5 2.5 0 0 0 0 5c.28 0 .5.22.5.5a2.5 2.5 0 1 0 5 0c0-.81-.7-1.8 0-2.5Z" />
+    </svg>
+  );
+}
+
+export function LayersIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+      <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+      <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+    </svg>
+  );
+}
+
+export function SmileIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+      <path d="M9 9h.01M15 9h.01" />
+    </svg>
+  );
+}
+
+export function ShieldIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  );
+}
+
+export function EyeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+export function SproutIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M7 20h10" />
+      <path d="M10 20c5.5-2.5.8-6.4 3-10" />
+      <path d="M9.5 9.4c1.1.8 1.8 2.2 2.3 3.7-2 .4-3.5.4-4.8-.3-1.2-.6-2.3-1.9-3-4.2 2.8-.5 4.4 0 5.5.8z" />
+      <path d="M14.1 6a7 7 0 0 0-1.1 4c1.9-.1 3.3-.6 4.3-1.4 1-1 1.6-2.3 1.7-4.6-2.7.1-4 1-4.9 2z" />
+    </svg>
+  );
+}

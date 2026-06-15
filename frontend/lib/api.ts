@@ -15,7 +15,6 @@ export type SocialHistory = {
   drug_status?: "never" | "former" | "current" | null;
   drug_substances?: string | null;
   sexual_activity_status?: "not_active" | "active" | null;
-  sexual_partners?: string | null;
   sexual_partner_genders?: string | null;
   sexual_protection?: "always" | "sometimes" | "never" | null;
 };

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { CloseIcon } from "@/components/icons";
 import { getConfig, getModels, updateConfig, type AppConfig } from "@/lib/api";
+import { useModalDismiss } from "@/lib/useModalDismiss";
 
 type SettingsModalProps = {
   open: boolean;
@@ -107,6 +108,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     return () => window.removeEventListener("keydown", handleKeydown);
   }, [open, onClose]);
 
+  const overlayDismiss = useModalDismiss(onClose);
+
   if (!open) {
     return null;
   }
@@ -128,8 +131,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="presentation">
-      <div className="modal-panel" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+      <div className="modal-panel">
         <div className="flex items-start justify-between gap-4 border-b border-border/80 pb-4">
           <div>
             <p className="eyebrow">Global Settings</p>

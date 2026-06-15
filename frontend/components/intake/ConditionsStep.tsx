@@ -2,8 +2,38 @@
 
 import { useState } from "react";
 
+import {
+  AppleIcon,
+  BoneIcon,
+  BrainIcon,
+  DropletIcon,
+  EyeIcon,
+  FlaskIcon,
+  HeartIcon,
+  LayersIcon,
+  ShieldIcon,
+  SmileIcon,
+  SproutIcon,
+  WindIcon,
+} from "@/components/icons";
 import type { PatientCondition } from "@/lib/api";
 import { CONDITION_CATEGORIES } from "@/lib/conditions";
+
+// One icon per condition category, keyed by the category name from CONDITION_CATEGORIES.
+const CATEGORY_ICONS: Record<string, typeof HeartIcon> = {
+  "Heart & Circulation": HeartIcon,
+  "Hormones & Metabolism": FlaskIcon,
+  "Brain & Nerves": BrainIcon,
+  "Lungs & Breathing": WindIcon,
+  "Digestive System": AppleIcon,
+  "Kidneys & Urinary": DropletIcon,
+  "Bones & Joints": BoneIcon,
+  Skin: LayersIcon,
+  "Mental Health": SmileIcon,
+  "Blood & Immune": ShieldIcon,
+  "Eyes & Vision": EyeIcon,
+  "Reproductive Health": SproutIcon,
+};
 
 type ConditionsStepProps = {
   patientName: string;
@@ -26,7 +56,7 @@ function isSelected(selected: PatientCondition[], category: string, code: string
 }
 
 export function ConditionsStep({ patientName, selected, onChange }: ConditionsStepProps) {
-  const [openCategory, setOpenCategory] = useState<string | null>(CONDITION_CATEGORIES[0]?.name ?? null);
+  const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
 
   const displayName = patientName.trim() || "this patient";
@@ -65,28 +95,15 @@ export function ConditionsStep({ patientName, selected, onChange }: ConditionsSt
         </p>
       </div>
 
-      {selected.length > 0 ? (
-        <div className="flex flex-wrap gap-2">
-          {selected.map((condition) => (
-            <button
-              className="chip-removable"
-              key={`${condition.category}:${condition.code}`}
-              onClick={() => removeCondition(condition)}
-              title="Remove"
-              type="button"
-            >
-              {condition.label}
-              <span aria-hidden className="ml-1">×</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-
       <div className="space-y-2">
         {CONDITION_CATEGORIES.map((category) => {
           const open = openCategory === category.name;
           const count = selected.filter((c) => c.category === category.name).length;
           const panelId = `conditions-${slugify(category.name)}`;
+          const Icon = CATEGORY_ICONS[category.name];
+          const customForCategory = selected.filter(
+            (c) => c.category === category.name && c.source === "custom",
+          );
           return (
             <div className="accordion-item" key={category.name}>
               <button
@@ -96,7 +113,12 @@ export function ConditionsStep({ patientName, selected, onChange }: ConditionsSt
                 onClick={() => setOpenCategory(open ? null : category.name)}
                 type="button"
               >
-                <span className="font-medium text-text-primary">{category.name}</span>
+                <span className="flex items-center gap-2.5 font-medium text-text-primary">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary-light text-primary">
+                    {Icon ? <Icon size={16} /> : null}
+                  </span>
+                  {category.name}
+                </span>
                 <span className="flex items-center gap-2">
                   {count > 0 ? <span className="status-chip">{count}</span> : null}
                   <span aria-hidden className="text-text-secondary">{open ? "−" : "+"}</span>
@@ -118,6 +140,13 @@ export function ConditionsStep({ patientName, selected, onChange }: ConditionsSt
                         </label>
                       );
                     })}
+                    {/* Custom conditions added to this category stay listed here. */}
+                    {customForCategory.map((custom) => (
+                      <label className="condition-row" key={custom.code}>
+                        <input checked onChange={() => removeCondition(custom)} type="checkbox" />
+                        <span>{custom.label}</span>
+                      </label>
+                    ))}
                   </div>
                   <div className="mt-3 flex gap-2">
                     <input
