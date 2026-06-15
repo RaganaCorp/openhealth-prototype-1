@@ -9,6 +9,8 @@ type LifestyleStepProps = {
   patientName: string;
   value: SocialHistoryDraft;
   onChange: (next: SocialHistoryDraft) => void;
+  // Hides the intake-style header when embedded in the profile-edit modal.
+  embedded?: boolean;
 };
 
 type Option<T extends string> = { value: T; label: string };
@@ -52,7 +54,7 @@ function ChipGroup<T extends string>({
   );
 }
 
-export function LifestyleStep({ patientName, value, onChange }: LifestyleStepProps) {
+export function LifestyleStep({ patientName, value, onChange, embedded }: LifestyleStepProps) {
   const [whyOpen, setWhyOpen] = useState(false);
 
   function patch(updates: Partial<SocialHistoryDraft>) {
@@ -89,33 +91,35 @@ export function LifestyleStep({ patientName, value, onChange }: LifestyleStepPro
 
   return (
     <div className="space-y-5">
-      <div className="border-b border-border/80 pb-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="eyebrow">Lifestyle &amp; social history</p>
-            <h2 className="text-2xl font-semibold text-text-primary">Habits that affect {displayName}&rsquo;s care</h2>
+      {embedded ? null : (
+        <div className="border-b border-border/80 pb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="eyebrow">Lifestyle &amp; social history</p>
+              <h2 className="text-2xl font-semibold text-text-primary">Habits that affect {displayName}&rsquo;s care</h2>
+            </div>
+            <button
+              aria-expanded={whyOpen}
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
+              onClick={() => setWhyOpen((open) => !open)}
+              type="button"
+            >
+              <InfoIcon size={14} />
+              Why we&apos;re asking
+            </button>
           </div>
-          <button
-            aria-expanded={whyOpen}
-            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
-            onClick={() => setWhyOpen((open) => !open)}
-            type="button"
-          >
-            <InfoIcon size={14} />
-            Why we&apos;re asking
-          </button>
+          <p className="mt-2 text-sm leading-6 text-text-secondary">
+            These can change clinical recommendations. All optional — share what&rsquo;s relevant.
+          </p>
+          {whyOpen ? (
+            <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
+              Lifestyle and social factors change how the record should be read — tobacco, alcohol, and drug use affect risk,
+              likely diagnoses, medication choices, and screening guidance. Sharing what&rsquo;s relevant helps the local AI give
+              safer, more grounded answers. It stays on your computer and you can change it anytime.
+            </div>
+          ) : null}
         </div>
-        <p className="mt-2 text-sm leading-6 text-text-secondary">
-          These can change clinical recommendations. All optional — share what&rsquo;s relevant.
-        </p>
-        {whyOpen ? (
-          <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
-            Lifestyle and social factors change how the record should be read — tobacco, alcohol, and drug use affect risk,
-            likely diagnoses, medication choices, and screening guidance. Sharing what&rsquo;s relevant helps the local AI give
-            safer, more grounded answers. It stays on your computer and you can change it anytime.
-          </div>
-        ) : null}
-      </div>
+      )}
 
       {/* Tobacco */}
       <div className="space-y-3">

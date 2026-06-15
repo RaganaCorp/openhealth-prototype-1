@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { CloseIcon } from "@/components/icons";
 import { ConditionsStep } from "@/components/intake/ConditionsStep";
 import { DemographicsStep } from "@/components/intake/DemographicsStep";
 import { LifestyleStep } from "@/components/intake/LifestyleStep";
@@ -19,6 +20,7 @@ import {
   type SexAssignedAtBirth,
   type SocialHistory,
 } from "@/lib/api";
+import { useModalDismiss } from "@/lib/useModalDismiss";
 import { formatHeight, formatWeight } from "@/lib/units";
 
 const SEX_LABELS: Record<SexAssignedAtBirth, string> = {
@@ -181,15 +183,24 @@ function ProfileView({ patient, onEdit }: { patient: Patient; onEdit: () => void
   );
 }
 
-function ProfileEditor({
+type EditTab = "demographics" | "lifestyle" | "conditions";
+
+const EDIT_TABS: { id: EditTab; label: string }[] = [
+  { id: "demographics", label: "Demographics" },
+  { id: "lifestyle", label: "Lifestyle" },
+  { id: "conditions", label: "Conditions" },
+];
+
+function ProfileEditorModal({
   patient,
-  onCancel,
+  onClose,
   onSaved,
 }: {
   patient: Patient;
-  onCancel: () => void;
+  onClose: () => void;
   onSaved: (patient: Patient) => void;
 }) {
+  const [tab, setTab] = useState<EditTab>("demographics");
   const [demographics, setDemographics] = useState<DemographicsDraft>(() =>
     demographicsFromProfile(patient.profile),
   );
@@ -199,6 +210,27 @@ function ProfileEditor({
   const [conditions, setConditions] = useState<PatientCondition[]>(() => patient.profile?.conditions ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const overlayDismiss = useModalDismiss(onClose);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Lock background scroll while open so the page doesn't add a second scrollbar
+  // alongside the modal's own.
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
 
   async function save() {
     try {
@@ -214,28 +246,51 @@ function ProfileEditor({
   }
 
   return (
-    <div className="panel-scroll flex-1 space-y-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="eyebrow">Profile</p>
-          <h2 className="text-2xl font-semibold text-text-primary">Edit patient details</h2>
-          <p className="mt-2 text-sm leading-6 text-text-secondary">Update demographics, lifestyle, and conditions.</p>
+    <div className="modal-overlay" role="presentation" {...overlayDismiss}>
+      <div className="modal-panel flex max-w-2xl flex-col" style={{ overflow: "hidden" }}>
+        <div className="flex items-center justify-between gap-3 border-b border-border/80">
+          <div className="flex">
+            {EDIT_TABS.map((item) => (
+              <button
+                className={`tab-button ${tab === item.id ? "active" : ""}`}
+                key={item.id}
+                onClick={() => setTab(item.id)}
+                type="button"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <button aria-label="Close" className="icon-button shrink-0" onClick={onClose} type="button">
+            <CloseIcon />
+          </button>
         </div>
-      </div>
 
-      <DemographicsStep onChange={setDemographics} patientName={patient.name} value={demographics} />
-      <LifestyleStep onChange={setSocial} patientName={patient.name} value={social} />
-      <ConditionsStep onChange={setConditions} patientName={patient.name} selected={conditions} />
+        {/* Only this middle region scrolls, so the panel keeps its rounded corners
+            and there's a single scrollbar. */}
+        <div className="panel-scroll min-h-0 flex-1 py-5">
+          {tab === "demographics" ? (
+            <DemographicsStep embedded onChange={setDemographics} patientName={patient.name} value={demographics} />
+          ) : null}
+          {tab === "lifestyle" ? (
+            <LifestyleStep embedded onChange={setSocial} patientName={patient.name} value={social} />
+          ) : null}
+          {tab === "conditions" ? (
+            <ConditionsStep embedded onChange={setConditions} patientName={patient.name} selected={conditions} />
+          ) : null}
+        </div>
 
-      {error ? <div className="status-error">{error}</div> : null}
-
-      <div className="sticky bottom-0 flex justify-end gap-3 border-t border-border/80 bg-surface/95 py-3 backdrop-blur">
-        <button className="button-secondary" disabled={saving} onClick={onCancel} type="button">
-          Cancel
-        </button>
-        <button className="button-primary" disabled={saving} onClick={save} type="button">
-          {saving ? "Saving…" : "Save changes"}
-        </button>
+        <div className="border-t border-border/80 pt-4">
+          {error ? <div className="status-error mb-3">{error}</div> : null}
+          <div className="flex justify-end gap-3">
+            <button className="button-secondary" disabled={saving} onClick={onClose} type="button">
+              Cancel
+            </button>
+            <button className="button-primary" disabled={saving} onClick={save} type="button">
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -250,18 +305,19 @@ export function PatientProfile({
 }) {
   const [editing, setEditing] = useState(false);
 
-  if (editing) {
-    return (
-      <ProfileEditor
-        onCancel={() => setEditing(false)}
-        onSaved={(updated) => {
-          onSaved?.(updated);
-          setEditing(false);
-        }}
-        patient={patient}
-      />
-    );
-  }
-
-  return <ProfileView onEdit={() => setEditing(true)} patient={patient} />;
+  return (
+    <>
+      <ProfileView onEdit={() => setEditing(true)} patient={patient} />
+      {editing ? (
+        <ProfileEditorModal
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => {
+            onSaved?.(updated);
+            setEditing(false);
+          }}
+          patient={patient}
+        />
+      ) : null}
+    </>
+  );
 }

@@ -81,6 +81,13 @@ select {
   backdrop-filter: blur(14px);
 }
 
+/* More horizontal breathing room for the main workspace panel (chat/profile/files),
+   without widening the denser sidebar. Higher specificity than the base padding. */
+.panel-card.panel-roomy {
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+
 .panel-scroll {
   overflow-y: auto;
 }
@@ -497,16 +504,17 @@ select {
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 5rem 1rem 1rem;
+  padding: 2.5rem 1rem 1rem;
+  border-radius: 8px;
   background: color-mix(in srgb, var(--color-text-primary) 18%, transparent);
   backdrop-filter: blur(8px);
 }
 
 .modal-panel {
   width: min(100%, 42rem);
-  max-height: calc(100vh - 6rem);
+  max-height: 100%;
   overflow-y: auto;
-  border-radius: 28px;
+  border-radius: 14px;
   border: 1px solid color-mix(in srgb, var(--color-border) 86%, white);
   background: var(--color-surface);
   padding: 1.3rem;
@@ -714,7 +722,7 @@ select {
 
 @media (max-width: 768px) {
   .modal-overlay {
-    padding-top: 4rem;
+    padding-top: 2rem;
   }
 
   .modal-panel {

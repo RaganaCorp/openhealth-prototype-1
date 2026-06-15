@@ -39,6 +39,8 @@ type ConditionsStepProps = {
   patientName: string;
   selected: PatientCondition[];
   onChange: (next: PatientCondition[]) => void;
+  // Hides the intake-style header when embedded in the profile-edit modal.
+  embedded?: boolean;
 };
 
 function slugify(value: string): string {
@@ -55,7 +57,7 @@ function isSelected(selected: PatientCondition[], category: string, code: string
   return selected.some((c) => c.category === category && c.code === code);
 }
 
-export function ConditionsStep({ patientName, selected, onChange }: ConditionsStepProps) {
+export function ConditionsStep({ patientName, selected, onChange, embedded }: ConditionsStepProps) {
   const [openCategory, setOpenCategory] = useState<string | null>(null);
   const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
 
@@ -87,13 +89,15 @@ export function ConditionsStep({ patientName, selected, onChange }: ConditionsSt
 
   return (
     <div className="space-y-5">
-      <div className="border-b border-border/80 pb-4">
-        <p className="eyebrow">Health conditions</p>
-        <h2 className="text-2xl font-semibold text-text-primary">{displayName}&rsquo;s health conditions</h2>
-        <p className="mt-2 text-sm leading-6 text-text-secondary">
-          Select any conditions {displayName} is currently managing. You can skip this entirely.
-        </p>
-      </div>
+      {embedded ? null : (
+        <div className="border-b border-border/80 pb-4">
+          <p className="eyebrow">Health conditions</p>
+          <h2 className="text-2xl font-semibold text-text-primary">{displayName}&rsquo;s health conditions</h2>
+          <p className="mt-2 text-sm leading-6 text-text-secondary">
+            Select any conditions {displayName} is currently managing. You can skip this entirely.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-2">
         {CONDITION_CATEGORIES.map((category) => {

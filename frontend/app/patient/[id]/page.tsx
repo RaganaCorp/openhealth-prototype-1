@@ -260,7 +260,7 @@ export default function PatientPage() {
           </div>
         </aside>
 
-        <section className="panel-card flex h-[calc(100vh-8.75rem)] min-h-[640px] flex-col animate-fade-up [animation-delay:110ms]">
+        <section className="panel-card panel-roomy flex h-[calc(100vh-8.75rem)] min-h-[640px] flex-col animate-fade-up [animation-delay:110ms]">
           <div className="mb-4 border-b border-border/80 pb-2">
             <div className="flex">
               <button

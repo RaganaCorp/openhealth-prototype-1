@@ -18,6 +18,9 @@ type DemographicsStepProps = {
   patientName: string;
   value: DemographicsDraft;
   onChange: (next: DemographicsDraft) => void;
+  // When embedded in the profile-edit modal, the intake-style header is hidden
+  // (the modal's tabs already identify the section).
+  embedded?: boolean;
 };
 
 const SEX_OPTIONS: { value: SexAssignedAtBirth; label: string }[] = [
@@ -31,7 +34,7 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function DemographicsStep({ patientName, value, onChange }: DemographicsStepProps) {
+export function DemographicsStep({ patientName, value, onChange, embedded }: DemographicsStepProps) {
   const [whyOpen, setWhyOpen] = useState(false);
 
   function patch(updates: Partial<DemographicsDraft>) {
@@ -92,33 +95,35 @@ export function DemographicsStep({ patientName, value, onChange }: DemographicsS
 
   return (
     <div className="space-y-5">
-      <div className="border-b border-border/80 pb-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="eyebrow">Demographics</p>
-            <h2 className="text-2xl font-semibold text-text-primary">Tell us about {patientName || "this patient"}</h2>
+      {embedded ? null : (
+        <div className="border-b border-border/80 pb-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="eyebrow">Demographics</p>
+              <h2 className="text-2xl font-semibold text-text-primary">Tell us about {patientName || "this patient"}</h2>
+            </div>
+            <button
+              aria-expanded={whyOpen}
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
+              onClick={() => setWhyOpen((open) => !open)}
+              type="button"
+            >
+              <InfoIcon size={14} />
+              Why we&apos;re asking
+            </button>
           </div>
-          <button
-            aria-expanded={whyOpen}
-            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs text-text-muted transition-colors hover:text-primary"
-            onClick={() => setWhyOpen((open) => !open)}
-            type="button"
-          >
-            <InfoIcon size={14} />
-            Why we&apos;re asking
-          </button>
+          <p className="mt-2 text-sm leading-6 text-text-secondary">
+            Everything here is optional — add what you know and skip the rest.
+          </p>
+          {whyOpen ? (
+            <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
+              These details give the local AI medical context for the record. Age, sex, and body measurements shift what counts
+              as normal — lab reference ranges, medication dosing, and risk factors are all read against them — so sharing what
+              you know leads to more accurate, grounded answers. It stays on your computer and you can change it anytime.
+            </div>
+          ) : null}
         </div>
-        <p className="mt-2 text-sm leading-6 text-text-secondary">
-          Everything here is optional — add what you know and skip the rest.
-        </p>
-        {whyOpen ? (
-          <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
-            These details give the local AI medical context for the record. Age, sex, and body measurements shift what counts
-            as normal — lab reference ranges, medication dosing, and risk factors are all read against them — so sharing what
-            you know leads to more accurate, grounded answers. It stays on your computer and you can change it anytime.
-          </div>
-        ) : null}
-      </div>
+      )}
 
       <label className="field-group">
         <span className="field-label">Date of birth</span>
