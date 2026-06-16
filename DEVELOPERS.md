@@ -33,9 +33,9 @@ pip install -r backend/requirements.txt
 Use the defaults in backend/config.defaults.json:
 
 ```bash
-ollama pull gemma4:e2b
+ollama pull gemma4:e2b-it-q4_K_M
 ollama pull dcarrascosa/medgemma-1.5-4b-it:Q4_K_M
-ollama pull nomic-embed-text
+ollama pull nomic-embed-text:latest
 ```
 
 ## 3. Run locally (no Docker)

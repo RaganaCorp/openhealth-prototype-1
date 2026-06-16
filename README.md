@@ -41,7 +41,15 @@ Choose one:
 - Download ZIP from GitHub and extract it.
 - If you already use Git: `git clone https://github.com/RaganaCorp/openhealth-prototype-1.git`
 
-### 2. Run the installer
+### 2. Install Docker Desktop
+Install Docker Desktop directly from the official website, then launch it and wait for it to fully start before continuing.
+
+- Windows: https://www.docker.com/products/docker-desktop/ (download the Windows installer, run it, then start Docker Desktop)
+- macOS: https://www.docker.com/products/docker-desktop/ (choose the Apple Silicon or Intel chip build that matches your Mac, install it, then start Docker Desktop)
+
+The installer in the next step will detect Docker and skip its own setup if Docker is already installed and running.
+
+### 3. Run the installer
 The installer checks Docker, helps with Ollama setup, copies the right Docker configuration, and pulls required AI models.
 
 Windows (PowerShell, copy/paste):
@@ -58,17 +66,17 @@ chmod +x ./install.sh
 ./install.sh
 ```
 
-### 3. Start the app
+### 4. Start the app
 From the project root:
 ```bash
 docker compose up
 ```
 
-### 4. Open in browser
+### 5. Open in browser
 - App: http://localhost:3000
 - API docs (optional check): http://localhost:8000/docs
 
-### 5. Stop the app later
+### 6. Stop the app later
 In the terminal running Docker Compose, press Ctrl+C.
 
 If you want to fully stop containers in the background:

@@ -2,7 +2,7 @@
   "chat_model": "gemma4:e2b",
   "clinical_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
   "verification_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
-  "embedding_model": "nomic-embed-text",
+  "embedding_model": "nomic-embed-text:latest",
   "embed_timeout_seconds": 60.0,
   "chat_timeout_seconds": 600.0,
   "meta_timeout_seconds": 15.0,
