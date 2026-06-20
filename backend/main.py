@@ -21,6 +21,7 @@ import ai
 import jobs
 import memory
 import patients as pt
+import prompts
 import timeline as tl
 import watcher
 from config import LOG_PAYLOADS, load_config, patch_config, save_config, Config
@@ -891,15 +892,7 @@ async def chat(body: ChatRequest):
         # models treat them as pre-loaded background knowledge rather than something
         # the user is asking them to process. Only the conversational elements
         # (state, history, question) go in the USER turn.
-        system_parts = [
-            "You are OpenHealth, a knowledgeable and compassionate medical AI assistant.\n"
-            "The patient's medical record is provided below.\n"
-            "Use it to ground your responses — interpret, explain, and connect information across the records.\n"
-            "When referencing specific information, cite the source document.\n"
-            "Be direct, warm, and clear. Write in paragraphs, not bullet points.\n"
-            "You are not limited to only what is in the documents — use your medical knowledge\n"
-            "to help the user understand, interpret, and act on what the records contain."
-        ]
+        system_parts = [prompts.CHAT_SYSTEM_PROMPT]
         if patient_context:
             system_parts.append(f"\n\n--- PATIENT RECORDS ---\n{patient_context}")
 
