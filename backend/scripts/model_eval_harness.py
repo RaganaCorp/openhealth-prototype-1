@@ -71,7 +71,7 @@ _VERIFICATION_SCHEMA: dict[str, Any] = {
 
 
 sys.path.insert(0, str(ROOT / "backend"))
-import timeline as tl  # noqa: E402
+import llm  # noqa: E402
 
 
 SCENARIO_RUBRICS = {
@@ -547,7 +547,7 @@ def build_scenarios(patient_context: str, json_source: str) -> list[dict[str, An
             "messages": [
                 {
                     "role": "user",
-                    "content": tl.build_grounding_prompt(
+                    "content": llm.build_grounding_prompt(
                         draft_answer="The patient has stage IV renal failure and is currently on warfarin daily.",
                         context=verification_context,
                     ),
@@ -560,7 +560,7 @@ def build_scenarios(patient_context: str, json_source: str) -> list[dict[str, An
             "messages": [
                 {
                     "role": "user",
-                    "content": tl.build_json_extraction_prompt(json_source),
+                    "content": llm.build_json_extraction_prompt(json_source),
                 }
             ],
             "validator": lambda output: len(output.strip()) > 120,

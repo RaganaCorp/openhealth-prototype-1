@@ -16,9 +16,9 @@ from typing import Optional
 
 import ai
 import documents as docs_module
+import llm
 import memory
 import patients as pt
-import timeline as tl
 from config import load_config
 
 _logger = logging.getLogger("uvicorn.error")
@@ -238,7 +238,7 @@ async def _make_llm_json_fn():
 
     def llm_json_fn(json_content: str) -> str:
         future = asyncio.run_coroutine_threadsafe(
-            tl.extract_json_document(json_content), loop
+            llm.extract_json_document(json_content), loop
         )
         return future.result(timeout=300)
 

@@ -19,10 +19,10 @@ from pydantic import BaseModel, field_validator
 
 import ai
 import jobs
+import llm
 import memory
 import patients as pt
 import prompts
-import timeline as tl
 import watcher
 from config import LOG_PAYLOADS, load_config, patch_config, save_config, Config
 
@@ -776,7 +776,7 @@ async def rebuild_state(patient_id: str, session_id: str):
         user_msg = messages[i] if messages[i]["role"] == "user" else None
         asst_msg = messages[i + 1] if len(messages) > i + 1 and messages[i + 1]["role"] == "assistant" else None
         if user_msg and asst_msg:
-            updates = await tl.update_conversation_state(
+            updates = await llm.update_conversation_state(
                 state, user_msg["content"], asst_msg["content"]
             )
             if state is None:
@@ -841,7 +841,7 @@ async def chat(body: ChatRequest):
         )
 
         # 1. Classify query for optimised chunk retrieval fallback.
-        doc_type = tl.classify_query(user_message)
+        doc_type = llm.classify_query(user_message)
 
         # 2. Retrieve relevant chat history (semantic memory).
         query_embedding = await ai.embed(user_message)
@@ -941,7 +941,7 @@ async def chat(body: ChatRequest):
             grounding_context_limit = max(8000, min(30000, effective_ctx_tokens // 2))
             grounding_uncertainty = ""
             for attempt in range(cfg.grounding_max_retries + 1):
-                result = await tl.verify_grounding(
+                result = await llm.verify_grounding(
                     final_answer,
                     context_for_grounding,
                     context_limit=grounding_context_limit,
@@ -1003,7 +1003,7 @@ async def chat(body: ChatRequest):
 
         # 9. Update conversation state (fire-and-forget style but awaited since
         #    we're still in the request — acceptable latency for a local app).
-        state_updates = await tl.update_conversation_state(conv_state, user_message, final_answer)
+        state_updates = await llm.update_conversation_state(conv_state, user_message, final_answer)
         if conv_state is None:
             conv_state = {
                 "created_at": now,
@@ -1032,7 +1032,7 @@ async def chat(body: ChatRequest):
         )
         if session_record and session_record.get("title_auto_generated") and session_record.get("title") == "New Chat":
             try:
-                auto_title = await tl.generate_session_title(
+                auto_title = await llm.generate_session_title(
                     user_message,
                     final_answer,
                     model=cfg.chat_model,

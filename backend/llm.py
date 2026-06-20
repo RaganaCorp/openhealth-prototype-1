@@ -1,8 +1,8 @@
 """
-LLM-based chat helpers: provider JSON document extraction, grounding
-verification, conversation-state updates, session titles, and query
-classification. Functions that call the model do so via ai.chat_complete;
-JSON responses are parsed from code-fenced LLM output.
+Higher-level LLM helpers built on top of the ai.py provider client: provider
+JSON document extraction, grounding verification, conversation-state updates,
+session titles, and query classification. Functions that call the model do so
+via ai.chat_complete; JSON responses are parsed from code-fenced LLM output.
 """
 
 import json
