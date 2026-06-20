@@ -88,6 +88,19 @@ def _legacy_chat_collection_names(patient_id: str, session_id: str) -> list[str]
     return [f"p_{patient_token}_c_{session_token}"]
 
 
+def _format_query_results(results: dict) -> list[dict]:
+    """Flatten a Chroma query response (single-query batch) into a list of
+    {text, metadata, distance} items."""
+    return [
+        {
+            "text": doc,
+            "metadata": results["metadatas"][0][i],
+            "distance": results["distances"][0][i],
+        }
+        for i, doc in enumerate(results["documents"][0])
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Document chunk store
 # ---------------------------------------------------------------------------
@@ -142,7 +155,6 @@ def _query_docs_sync(
         except Exception:
             return []
 
-    where: Optional[dict] = None
     if document_type and document_type != "unknown":
         where = {"$and": [
             {"patient_id": {"$eq": patient_id}},
@@ -162,14 +174,7 @@ def _query_docs_sync(
         except StopIteration:
             _logger.warning("ChromaDB StopIteration during docs query; returning empty results")
             return []
-    items = []
-    for i, doc in enumerate(results["documents"][0]):
-        items.append({
-            "text": doc,
-            "metadata": results["metadatas"][0][i],
-            "distance": results["distances"][0][i],
-        })
-    return items
+    return _format_query_results(results)
 
 
 async def query_docs(
@@ -311,14 +316,7 @@ def _query_chat_sync(
         except StopIteration:
             _logger.warning("ChromaDB StopIteration during chat query; returning empty results")
             return []
-    items = []
-    for i, doc in enumerate(results["documents"][0]):
-        items.append({
-            "text": doc,
-            "metadata": results["metadatas"][0][i],
-            "distance": results["distances"][0][i],
-        })
-    return items
+    return _format_query_results(results)
 
 
 async def query_chat(

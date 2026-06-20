@@ -247,10 +247,8 @@ async def _make_llm_json_fn():
 
 async def _process_file(
     patient_id: str,
-    folder_slug: str,
     file_path: Path,
     existing_doc: Optional[dict],
-    job: dict,
     is_rebuild: bool,
 ) -> dict:
     """
@@ -417,7 +415,6 @@ async def _run_incremental(
             _fail_job(job, "Patient not found")
             return
 
-        folder_slug = entry["folder_slug"]
         patient_folder = Path(entry["folder_path"])
         uploads_dir = patient_folder / "uploads"
 
@@ -451,7 +448,7 @@ async def _run_incremental(
         for file_path, existing_doc in files_to_process:
             job["current_file"] = file_path.name
             doc_record = await _process_file(
-                patient_id, folder_slug, file_path, existing_doc, job, is_rebuild=False
+                patient_id, file_path, existing_doc, is_rebuild=False
             )
             updated_docs[doc_record["filename"]] = doc_record
             job["processed"] += 1
@@ -497,7 +494,6 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
             _fail_job(job, "Patient not found")
             return
 
-        folder_slug = entry["folder_slug"]
         patient_folder = Path(entry["folder_path"])
         uploads_dir = patient_folder / "uploads"
 
@@ -522,7 +518,7 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         for file_path in all_files:
             job["current_file"] = file_path.name
             doc_record = await _process_file(
-                patient_id, folder_slug, file_path, None, job, is_rebuild=True
+                patient_id, file_path, None, is_rebuild=True
             )
             new_docs.append(doc_record)
             job["processed"] += 1

@@ -129,11 +129,6 @@ async def load_patients_index() -> list[dict]:
         return await asyncio.to_thread(_load_index_sync)
 
 
-async def save_patients_index(index: list[dict]) -> None:
-    async with _index_lock:
-        await asyncio.to_thread(_save_index_sync, index)
-
-
 async def mutate_patients_index(mutator: Callable[[list[dict]], Any]) -> Any:
     """Atomically load → mutate → save patients.json. Holding the lock across the
     whole read-modify-write cycle prevents two concurrent writers (e.g. a rename
@@ -150,11 +145,6 @@ async def mutate_patients_index(mutator: Callable[[list[dict]], Any]) -> Any:
 async def find_patient_by_id(patient_id: str) -> Optional[dict]:
     index = await load_patients_index()
     return next((p for p in index if p["id"] == patient_id), None)
-
-
-async def find_patient_by_slug(folder_slug: str) -> Optional[dict]:
-    index = await load_patients_index()
-    return next((p for p in index if p["folder_slug"] == folder_slug), None)
 
 
 def _thin_shape(entry: dict) -> dict:
@@ -317,14 +307,6 @@ async def load_patient_record(patient_id: str) -> Optional[dict]:
     if entry is None:
         return None
     return await asyncio.to_thread(_load_patient_record_sync, entry["folder_slug"])
-
-
-async def save_patient_record(record: dict) -> None:
-    entry = await find_patient_by_id(record["id"])
-    if entry is None:
-        return
-    async with _record_lock(record["id"]):
-        await asyncio.to_thread(_save_patient_record_sync, entry["folder_slug"], record)
 
 
 async def mutate_patient_record(
