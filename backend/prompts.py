@@ -45,35 +45,6 @@ JSON CONTENT:
 
 
 # ---------------------------------------------------------------------------
-# Conversation state
-# ---------------------------------------------------------------------------
-
-STATE_UPDATE_PROMPT = """\
-You are maintaining a compact clinical conversation state for a medical assistant.
-Given the latest user message, assistant response, and prior state, update the state.
-
-Prior state:
-{prior_state}
-
-Latest user message:
-{user_message}
-
-Latest assistant response:
-{assistant_response}
-
-Return updated state as JSON wrapped in a ```json ... ``` code fence:
-{{
-  "rolling_summary": "4-8 sentence summary of the full conversation so far",
-  "active_topics": ["short phrase 1", "short phrase 2"],
-  "open_questions": ["unresolved question 1"]
-}}
-
-Keep the state factual, concise, and grounded in the conversation and records.
-Do not invent patient facts.
-"""
-
-
-# ---------------------------------------------------------------------------
 # Grounding verification
 # ---------------------------------------------------------------------------
 
@@ -113,18 +84,4 @@ User: {first_user_message}
 Assistant: {first_assistant_response}
 
 Return only the title text, no punctuation, no quotes.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Query classification
-# ---------------------------------------------------------------------------
-
-CLASSIFY_QUERY_PROMPT = """\
-Classify this medical query into one of these document types:
-lab result, discharge summary, imaging, prescription, clinical note, unknown
-
-Query: {query}
-
-Return only the document type label, nothing else.
 """
