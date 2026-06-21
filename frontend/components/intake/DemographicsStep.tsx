@@ -119,7 +119,8 @@ export function DemographicsStep({ patientName, value, onChange, embedded }: Dem
             <div className="mt-3 animate-fade-up rounded-xl border border-border/70 bg-surface-elevated/60 p-3.5 text-sm leading-6 text-text-secondary">
               These details give the local AI medical context for the record. Age, sex, and body measurements shift what counts
               as normal — lab reference ranges, medication dosing, and risk factors are all read against them — so sharing what
-              you know leads to more accurate, grounded answers. It stays on your computer and you can change it anytime.
+              you know leads to more accurate, grounded answers. Date of birth also helps place each uploaded document at the
+              right point in the timeline. It stays on your computer and you can change it anytime.
             </div>
           ) : null}
         </div>

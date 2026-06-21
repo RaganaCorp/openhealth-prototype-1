@@ -409,12 +409,19 @@ export default function PatientPage() {
               {trackedJobId ? (
                 <IngestionProgress
                   jobId={trackedJobId}
-                  onResolved={async () => {
-                    // Job finished — unblock chat/record actions and refresh the
-                    // record. Leave the banner visible; the user dismisses it by
-                    // navigating away or starting another ingestion.
+                  onResolved={async (job) => {
+                    // Job finished — unblock chat/record actions.
                     setActiveJob(null);
-                    setTrackedJobTerminal(true);
+                    if (job.operation === "deletion") {
+                      // Deletion is transient — clear it so the chip disappears
+                      // and the record buttons unblock right away.
+                      setTrackedJobId(null);
+                      setTrackedJobTerminal(false);
+                    } else {
+                      // Ingestion/rebuild — leave the finished banner visible; the
+                      // user dismisses it by navigating away or starting another job.
+                      setTrackedJobTerminal(true);
+                    }
                     await refreshSidebar();
                     await refreshRecordView();
                   }}
@@ -476,7 +483,7 @@ export default function PatientPage() {
                       {confirmingDeleteDocId === doc.id ? (
                         <div className="flex shrink-0 items-center gap-2">
                           <span className="text-xs text-text-secondary">Delete file?</span>
-                          <button className="button-danger px-3 py-2 text-xs" disabled={Boolean(trackedJobId)} onClick={deleteDoc} type="button">
+                          <button className="button-danger px-3 py-2 text-xs" disabled={Boolean(activeJob)} onClick={deleteDoc} type="button">
                             Delete
                           </button>
                           <button className="button-secondary px-3 py-2 text-xs" onClick={() => setConfirmingDeleteDocId(null)} type="button">
@@ -486,7 +493,7 @@ export default function PatientPage() {
                       ) : (
                         <button
                           className="button-danger shrink-0 px-3 py-2 text-xs"
-                          disabled={Boolean(trackedJobId) || deletingDocumentId === doc.id}
+                          disabled={Boolean(activeJob) || deletingDocumentId === doc.id}
                           onClick={() => setConfirmingDeleteDocId(doc.id)}
                           type="button"
                         >

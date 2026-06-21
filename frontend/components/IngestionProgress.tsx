@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { InfoIcon } from "@/components/icons";
 import { getJobStatus, type JobStatus } from "@/lib/api";
 
 type IngestionProgressProps = {
@@ -157,7 +158,7 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
 
   const phaseWarningThresholdMs: Record<string, number> = {
     loading: 10_000,
-    processing_files: 45_000,
+    processing_files: 120_000,
     rebuilding_patient_md: 15_000,
     saving: 10_000,
   };
@@ -227,8 +228,9 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
       ) : null}
 
       {isPhaseSlow ? (
-        <div className="mt-2 text-xs text-error">
-          This step is taking longer than usual. The model may still be working.
+        <div className="mt-2 flex items-start gap-1.5 text-xs text-text-secondary">
+          <InfoIcon size={13} className="mt-px shrink-0" />
+          <span>Running on local hardware, extraction can take a few minutes — longer for large or scanned documents. Still working…</span>
         </div>
       ) : null}
     </div>
