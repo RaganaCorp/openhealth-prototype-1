@@ -58,6 +58,10 @@ export default function PatientPage() {
   // newly selected patient's state (the App Router reuses this component
   // instance when only the [id] param changes).
   const patientIdRef = useRef(patientId);
+  // Mirror of trackedJobTerminal for the navigate-away effect, so it can read the
+  // latest value without re-running when the flag flips (which would dismiss the
+  // banner the instant a job finishes instead of when the user leaves).
+  const trackedJobTerminalRef = useRef(false);
 
   async function refreshSidebar() {
     const pid = patientId;
@@ -185,6 +189,20 @@ export default function PatientPage() {
       window.clearInterval(interval);
     };
   }, [patientId, trackedJobId, trackedJobTerminal]);
+
+  useEffect(() => {
+    trackedJobTerminalRef.current = trackedJobTerminal;
+  }, [trackedJobTerminal]);
+
+  // Leaving the Record Files tab dismisses a *finished* ingestion banner. A
+  // still-running job keeps tracking (the banner is mounted-but-hidden) so its
+  // completion is still detected and the record refreshed.
+  useEffect(() => {
+    if (activeTab !== "files" && trackedJobTerminalRef.current) {
+      setTrackedJobId(null);
+      setTrackedJobTerminal(false);
+    }
+  }, [activeTab]);
 
   const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
 
@@ -334,39 +352,6 @@ export default function PatientPage() {
             </div>
           ) : null}
 
-          {trackedJobId ? (
-            <div className="mb-4">
-              <IngestionProgress
-                jobId={trackedJobId}
-                onResolved={async (job) => {
-                  // Job is terminal — stop treating it as active so chat and
-                  // record actions unblock immediately, and let idle job
-                  // detection resume.
-                  setActiveJob(null);
-                  setTrackedJobTerminal(true);
-                  // On success, hide the banner; on failure keep it visible
-                  // (with a Dismiss button) so the error stays surfaced.
-                  if (job.status === "complete") {
-                    setTrackedJobId(null);
-                  }
-                  await refreshSidebar();
-                  await refreshRecordView();
-                }}
-                onTerminalError={() => {
-                  // Job status is unreachable (e.g. backend restarted and the
-                  // in-memory job is gone) — unblock the UI and resume detection.
-                  setActiveJob(null);
-                  setTrackedJobTerminal(true);
-                }}
-                onDismiss={() => {
-                  setActiveJob(null);
-                  setTrackedJobId(null);
-                  setTrackedJobTerminal(false);
-                }}
-              />
-            </div>
-          ) : null}
-
           {/* Chat stays mounted across tab switches so an in-flight send (pending
               bubble, thinking indicator, error state) isn't lost. */}
           <div className={activeTab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
@@ -392,8 +377,7 @@ export default function PatientPage() {
             <PatientProfile onSaved={(updated) => setPatient(updated)} patient={patient} />
           ) : null}
 
-          {activeTab === "files" ? (
-            <div className="panel-scroll flex-1 space-y-5">
+            <div className={activeTab === "files" ? "panel-scroll flex-1 space-y-5" : "hidden"}>
               <div>
                 <p className="eyebrow">Record Files</p>
                 <h2 className="text-2xl font-semibold text-text-primary">{documents.length} documents loaded</h2>
@@ -408,6 +392,7 @@ export default function PatientPage() {
                   setActiveJob({
                     job_id: jobId,
                     patient_id: patient.id,
+                    operation: "ingestion",
                     status: "running",
                     total: 0,
                     processed: 0,
@@ -420,6 +405,30 @@ export default function PatientPage() {
                 }}
                 patientId={patient.id}
               />
+
+              {trackedJobId ? (
+                <IngestionProgress
+                  jobId={trackedJobId}
+                  onResolved={async () => {
+                    // Job finished — unblock chat/record actions and refresh the
+                    // record. Leave the banner visible; the user dismisses it by
+                    // navigating away or starting another ingestion.
+                    setActiveJob(null);
+                    setTrackedJobTerminal(true);
+                    await refreshSidebar();
+                    await refreshRecordView();
+                  }}
+                  onTerminalError={() => {
+                    setActiveJob(null);
+                    setTrackedJobTerminal(true);
+                  }}
+                  onDismiss={() => {
+                    setActiveJob(null);
+                    setTrackedJobId(null);
+                    setTrackedJobTerminal(false);
+                  }}
+                />
+              ) : null}
 
               <div className="space-y-2">
                 {documents.length === 0 ? <div className="empty-state">No documents loaded yet.</div> : null}
@@ -434,6 +443,7 @@ export default function PatientPage() {
                       setActiveJob({
                         job_id: result.job_id,
                         patient_id: patient.id,
+                        operation: "deletion",
                         status: "running",
                         total: 0,
                         processed: 0,
@@ -453,13 +463,19 @@ export default function PatientPage() {
                     <div className="patient-tile" key={doc.id}>
                       <div className="min-w-0 flex-1">
                         <span className="block truncate text-sm font-medium">{doc.filename}</span>
-                        <span className="mt-1 block text-xs text-text-secondary">
-                          {doc.document_type} · {doc.date_detected}
-                        </span>
+                        {doc.status === "error" ? (
+                          <span className="mt-1 block text-xs text-error">
+                            Ingestion failed — {doc.error ?? "unknown error"}
+                          </span>
+                        ) : (
+                          <span className="mt-1 block text-xs text-text-secondary">
+                            {doc.document_type} · {doc.date_detected}
+                          </span>
+                        )}
                       </div>
                       {confirmingDeleteDocId === doc.id ? (
                         <div className="flex shrink-0 items-center gap-2">
-                          <span className="text-xs text-text-secondary">Delete &amp; rebuild?</span>
+                          <span className="text-xs text-text-secondary">Delete file?</span>
                           <button className="button-danger px-3 py-2 text-xs" disabled={Boolean(trackedJobId)} onClick={deleteDoc} type="button">
                             Delete
                           </button>
@@ -482,7 +498,6 @@ export default function PatientPage() {
                 })}
               </div>
             </div>
-          ) : null}
         </section>
 
 

@@ -107,13 +107,35 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
     return <div className="status-chip">Checking ingestion status…</div>;
   }
 
+  // Deletion is a fast, no-model operation — show a slim indicator rather than the
+  // full ingestion panel. We still track the job (to block concurrent actions and
+  // surface failures); we just don't dress it up as an ingest.
+  if (job.operation === "deletion") {
+    if (job.status === "failed") {
+      return (
+        <div className="status-error flex flex-wrap items-center justify-between gap-3">
+          <span>Could not remove document{job.error ? ` — ${job.error}` : ""}</span>
+          {onDismiss ? (
+            <button className="button-secondary px-3 py-1 text-xs" onClick={onDismiss} type="button">
+              Dismiss
+            </button>
+          ) : null}
+        </div>
+      );
+    }
+    return <div className="status-chip">Removing document…</div>;
+  }
+
   const safeTotal = Math.max(job.total, 1);
   const percent = Math.round((job.processed / safeTotal) * 100);
   const tone = job.status === "failed" ? "status-chip-error" : job.status === "complete" ? "status-chip-success" : "status-chip";
+  const title = job.operation === "rebuild" ? "Rebuilding record" : "Document ingestion";
   const phaseLabels: Record<string, string> = {
     queued: "Queued",
     loading: "Loading patient record",
     processing_files: "Extracting and embedding files",
+    deleting_files: "Removing files",
+    removing_chunks: "Removing vectors",
     rebuilding_patient_md: "Rebuilding patient document",
     saving: "Saving updates",
     complete: "Ready",
@@ -154,7 +176,7 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
     <div className="rounded-[22px] border border-border/80 bg-surface-elevated p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm font-semibold text-text-primary">Document ingestion</p>
+          <p className="text-sm font-semibold text-text-primary">{title}</p>
           <p className="mt-1 text-sm text-text-secondary">
             {job.status === "running" ? runningText : job.status === "complete" ? "Ready" : "Needs Review"}
           </p>

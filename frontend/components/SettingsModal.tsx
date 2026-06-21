@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { CloseIcon } from "@/components/icons";
 import { ModalPortal } from "@/components/ModalPortal";
-import { getConfig, getModels, updateConfig, type AppConfig } from "@/lib/api";
+import { getConfig, getModels, updateConfig, type AppConfig, type ModelInfo } from "@/lib/api";
 import { useModalDismiss } from "@/lib/useModalDismiss";
 
 type SettingsModalProps = {
@@ -62,7 +62,7 @@ function pickMedicalModel(installedModels: string[], currentModel: string): stri
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,18 +115,27 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     return null;
   }
 
-  // Always include the currently-configured model as an option, even if it's not
-  // in the installed list (uninstalled/renamed model, or Ollama unreachable so the
-  // list is empty). Otherwise the <select> would silently show the first installed
-  // model while still holding the old value, and an unrelated Save would repoint
-  // the model without the user noticing.
-  const renderModelOptions = (current: string) => {
-    const installed = new Set(models);
-    const options = !current || installed.has(current) ? models : [current, ...models];
-    return options.map((model) => (
-      <option key={model} value={model}>
-        {model}
-        {model === current && !installed.has(model) ? " (not installed)" : ""}
+  // Filter dropdowns by the model's Ollama-reported capability: "embedding" for the
+  // embedding dropdown, "vision" for the vision dropdown, "completion" for the
+  // chat/clinical/verification dropdowns. Always include the currently-configured
+  // model even if it's not installed or doesn't match the filter (uninstalled model,
+  // or Ollama unreachable so the list is empty) — otherwise the <select> would
+  // silently show a different model while holding the old value, and a Save would
+  // repoint it without the user noticing.
+  const renderModelOptions = (current: string, kind: "generative" | "vision" | "embedding") => {
+    const capability = kind === "embedding" ? "embedding" : kind === "vision" ? "vision" : "completion";
+    let filtered = models.filter((model) => model.capabilities.includes(capability)).map((model) => model.name);
+    // If no vision-capable models are reported (older Ollama that doesn't expose
+    // capabilities), fall back to generative models so the dropdown isn't empty.
+    if (kind === "vision" && filtered.length === 0) {
+      filtered = models.filter((model) => model.capabilities.includes("completion")).map((model) => model.name);
+    }
+    const options = current && !filtered.includes(current) ? [current, ...filtered] : filtered;
+    const installed = new Set(models.map((model) => model.name));
+    return options.map((name) => (
+      <option key={name} value={name}>
+        {name}
+        {name === current && !installed.has(name) ? " (not installed)" : ""}
       </option>
     ));
   };
@@ -160,6 +169,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                   chat_model: config.chat_model,
                   clinical_model: config.clinical_model,
                   verification_model: config.verification_model,
+                  vision_model: config.vision_model,
                   embedding_model: config.embedding_model,
                   chunk_size: config.chunk_size,
                   chunk_overlap: config.chunk_overlap,
@@ -188,8 +198,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 <button
                   className="button-secondary"
                   onClick={() => {
-                    const fastModel = pickFastModel(models, config.chat_model);
-                    const medicalModel = pickMedicalModel(models, config.clinical_model);
+                    const modelNames = models.map((model) => model.name);
+                    const fastModel = pickFastModel(modelNames, config.chat_model);
+                    const medicalModel = pickMedicalModel(modelNames, config.clinical_model);
                     setConfig({
                       ...config,
                       chat_model: fastModel,
@@ -214,21 +225,28 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             <label className="field-group">
               <span className="field-label">Chat model (fast path)</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, chat_model: event.target.value })} value={config.chat_model}>
-                {renderModelOptions(config.chat_model)}
+                {renderModelOptions(config.chat_model, "generative")}
               </select>
             </label>
 
             <label className="field-group">
               <span className="field-label">Clinical model</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, clinical_model: event.target.value })} value={config.clinical_model}>
-                {renderModelOptions(config.clinical_model)}
+                {renderModelOptions(config.clinical_model, "generative")}
               </select>
             </label>
 
             <label className="field-group">
               <span className="field-label">Verification model</span>
               <select className="field-input" onChange={(event) => setConfig({ ...config, verification_model: event.target.value })} value={config.verification_model}>
-                {renderModelOptions(config.verification_model)}
+                {renderModelOptions(config.verification_model, "generative")}
+              </select>
+            </label>
+
+            <label className="field-group">
+              <span className="field-label">Vision model (image documents)</span>
+              <select className="field-input" onChange={(event) => setConfig({ ...config, vision_model: event.target.value })} value={config.vision_model}>
+                {renderModelOptions(config.vision_model, "vision")}
               </select>
             </label>
 
@@ -239,7 +257,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 onChange={(event) => setConfig({ ...config, embedding_model: event.target.value })}
                 value={config.embedding_model}
               >
-                {renderModelOptions(config.embedding_model)}
+                {renderModelOptions(config.embedding_model, "embedding")}
               </select>
             </label>
 

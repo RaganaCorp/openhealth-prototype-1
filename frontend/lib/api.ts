@@ -88,6 +88,7 @@ export type PhaseHistoryEntry = {
 export type JobStatus = {
   job_id: string;
   patient_id: string;
+  operation?: "ingestion" | "rebuild" | "deletion";
   status: "running" | "complete" | "failed";
   phase?: string;
   phase_started_at?: string;
@@ -105,18 +106,22 @@ export type PatientDocument = {
   patient_id: string;
   filename: string;
   file_path: string;
-  extracted_file_path: string;
+  extracted_file_path?: string;
   date_detected: string;
   document_type: string;
   ingested_at: string;
-  mtime: number;
-  size: number;
+  mtime?: number;
+  size?: number;
+  // "error" when ingestion failed for this file; `error` carries the reason.
+  status?: "ok" | "error";
+  error?: string | null;
 };
 
 export type AppConfig = {
   chat_model: string;
   clinical_model: string;
   verification_model: string;
+  vision_model: string;
   embedding_model: string;
   embed_timeout_seconds: number;
   chat_timeout_seconds: number;
@@ -340,8 +345,14 @@ export function updateConfig(updates: Partial<AppConfig>) {
   });
 }
 
+export type ModelInfo = {
+  name: string;
+  // Ollama-reported capabilities, e.g. ["completion", "vision"] or ["embedding"].
+  capabilities: string[];
+};
+
 export async function getModels() {
-  const data = await request<{ models: string[] }>("/models");
+  const data = await request<{ models: ModelInfo[] }>("/models");
   return data.models;
 }
 
