@@ -43,6 +43,10 @@ class Config(BaseModel):
     chat_model: str
     clinical_model: str
     verification_model: str
+    # Multimodal model used to transcribe scanned/image documents. A higher-quality
+    # (less-quantized) model here loops far less on the hard vision task, while text
+    # extraction stays on the faster clinical_model.
+    vision_model: str
     embedding_model: str
     embed_timeout_seconds: float
     chat_timeout_seconds: float
@@ -53,6 +57,10 @@ class Config(BaseModel):
     context_window_tokens: int
     data_path: str = str(DATA_PATH)
     ollama_base_url: str
+    # How long Ollama keeps a model resident after a request. Keeping models warm
+    # avoids reloading weights on every call (model "thrash") when the pipeline
+    # rotates between the chat/extraction model, the embedder, and the verifier.
+    ollama_keep_alive: str = "30m"
     routing_mode: str
     medgemma_verification_enabled: bool
     grounding_enabled: bool

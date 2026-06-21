@@ -3,17 +3,41 @@ Ollama HTTP client — embeddings, chat completions, model listing.
 All calls use httpx.AsyncClient with appropriate timeouts.
 """
 
+import asyncio
+import base64
 import logging
 import json
 import re
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from config import LOG_PAYLOADS, load_config
 
 _logger = logging.getLogger("uvicorn.error")
+
+
+# A single shared AsyncClient is reused across all Ollama calls so HTTP
+# connections are pooled and kept alive, instead of opening (and tearing down) a
+# fresh connection on every embed/chat request. Per-request timeouts are still
+# passed explicitly, so the shared client carries no default timeout of its own.
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=None)
+    return _client
+
+
+async def aclose_client() -> None:
+    """Close the shared client. Call on application shutdown."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 
 def _log_ollama_call_start(endpoint: str, model: str | None = None) -> float:
@@ -126,15 +150,15 @@ async def ensure_ollama_available() -> None:
     cfg = load_config()
     endpoint = "/api/tags"
     try:
-        async with httpx.AsyncClient() as client:
-            started_at = _log_ollama_call_start(endpoint)
-            resp = await client.get(
-                f"{cfg.ollama_base_url}/api/tags",
-                timeout=cfg.meta_timeout_seconds,
-            )
-            resp.raise_for_status()
-            _log_ollama_call_end(started_at, endpoint, resp.status_code)
-            payload = resp.json()
+        client = _get_client()
+        started_at = _log_ollama_call_start(endpoint)
+        resp = await client.get(
+            f"{cfg.ollama_base_url}/api/tags",
+            timeout=cfg.meta_timeout_seconds,
+        )
+        resp.raise_for_status()
+        _log_ollama_call_end(started_at, endpoint, resp.status_code)
+        payload = resp.json()
     except httpx.HTTPError as exc:
         raise RuntimeError(
             f"Unable to reach Ollama at {cfg.ollama_base_url}. "
@@ -153,6 +177,7 @@ async def ensure_ollama_available() -> None:
         cfg.chat_model,
         cfg.clinical_model,
         cfg.verification_model,
+        cfg.vision_model,
         cfg.embedding_model,
     }
     missing: list[str] = [name for name in sorted(required_models) if name not in installed]
@@ -166,61 +191,103 @@ async def ensure_ollama_available() -> None:
         )
 
 
-async def embed(text: str) -> list[float]:
-    cfg = load_config()
-    endpoint = "/api/embeddings"
-    async with httpx.AsyncClient() as client:
-        try:
-            started_at = _log_ollama_call_start(endpoint, cfg.embedding_model)
-            resp = await client.post(
-                f"{cfg.ollama_base_url}/api/embeddings",
-                json={"model": cfg.embedding_model, "prompt": text},
-                timeout=cfg.embed_timeout_seconds,
-            )
-            resp.raise_for_status()
-            _log_ollama_call_end(started_at, endpoint, resp.status_code)
-        except httpx.HTTPStatusError as exc:
-            detail = _extract_ollama_error(exc)
-            _logger.error(
-                "ollama embeddings http error endpoint=%s model=%s detail=%s payload=%s",
-                endpoint,
-                cfg.embedding_model,
-                detail,
-                _loggable_payload({"model": cfg.embedding_model, "prompt": text}),
-            )
-            raise RuntimeError(
-                f"Ollama embeddings request failed for model '{cfg.embedding_model}': {detail}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            _logger.exception(
-                "ollama embeddings transport error endpoint=%s model=%s payload=%s",
-                endpoint,
-                cfg.embedding_model,
-                _loggable_payload({"model": cfg.embedding_model, "prompt": text}),
-            )
-            raise RuntimeError(
-                f"Ollama embeddings transport failure for model '{cfg.embedding_model}': {exc}"
-            ) from exc
+def _validate_embedding(vector: Any, model: str) -> None:
+    """Reject a malformed embedding before it reaches ChromaDB. A bad vector would
+    otherwise corrupt the collection and break every later query for that patient."""
+    if not isinstance(vector, list) or not vector or not all(
+        isinstance(v, (int, float)) for v in vector
+    ):
+        raise RuntimeError(
+            f"Ollama returned an invalid embedding for model '{model}': "
+            f"expected a non-empty numeric vector, got {type(vector).__name__}"
+        )
 
-        # Validate the response shape before handing the vector downstream: an
-        # unexpected/empty body would otherwise raise a bare KeyError (500) or,
-        # worse, push a malformed vector into ChromaDB and break all later queries
-        # for that collection. Different Ollama versions use "embedding" or
-        # "embeddings"; accept either.
-        payload = resp.json()
-        embedding = payload.get("embedding")
-        if embedding is None:
-            embeddings = payload.get("embeddings")
-            if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
-                embedding = embeddings[0]
-        if not isinstance(embedding, list) or not embedding or not all(
-            isinstance(v, (int, float)) for v in embedding
-        ):
-            raise RuntimeError(
-                f"Ollama returned an invalid embedding for model '{cfg.embedding_model}': "
-                f"expected a non-empty numeric vector, got {type(embedding).__name__}"
-            )
-        return embedding
+
+EmbedTask = Literal["query", "document"]
+
+# Per-model retrieval instruction prefixes. nomic-embed-text is trained to be
+# prompted with these task prefixes, and using them improves query↔document
+# retrieval. The prefix is model-specific (bge/mxbai/qwen want different formats),
+# so we only prefix models we have a known mapping for and pass others through raw
+# rather than risk applying the wrong instruction.
+_EMBED_PREFIXES: dict[str, dict[EmbedTask, str]] = {
+    "nomic-embed-text": {"query": "search_query: ", "document": "search_document: "},
+}
+
+
+def _embed_prefix(model: str, task: EmbedTask) -> str:
+    base = model.split(":", 1)[0]  # drop any :tag (e.g. ":latest")
+    return _EMBED_PREFIXES.get(base, {}).get(task, "")
+
+
+async def embed_many(texts: list[str], task: EmbedTask) -> list[list[float]]:
+    """Embed multiple texts in a single Ollama call. Returns one vector per input,
+    in order. Batching avoids a separate HTTP round-trip per chunk during ingestion.
+
+    ``task`` selects the retrieval instruction prefix ("query" for search inputs,
+    "document" for stored content); the prefix is applied to the embedding input
+    only and never to the text the caller stores."""
+    if not texts:
+        return []
+    cfg = load_config()
+    endpoint = "/api/embed"
+    prefix = _embed_prefix(cfg.embedding_model, task)
+    inputs = [prefix + t for t in texts] if prefix else texts
+    request_payload = {
+        "model": cfg.embedding_model,
+        "input": inputs,
+        "keep_alive": cfg.ollama_keep_alive,
+    }
+    try:
+        client = _get_client()
+        started_at = _log_ollama_call_start(endpoint, cfg.embedding_model)
+        resp = await client.post(
+            f"{cfg.ollama_base_url}/api/embed",
+            json=request_payload,
+            timeout=cfg.embed_timeout_seconds,
+        )
+        resp.raise_for_status()
+        _log_ollama_call_end(started_at, endpoint, resp.status_code)
+    except httpx.HTTPStatusError as exc:
+        detail = _extract_ollama_error(exc)
+        _logger.error(
+            "ollama embed http error endpoint=%s model=%s count=%d detail=%s",
+            endpoint,
+            cfg.embedding_model,
+            len(texts),
+            detail,
+        )
+        raise RuntimeError(
+            f"Ollama embed request failed for model '{cfg.embedding_model}': {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        _logger.exception(
+            "ollama embed transport error endpoint=%s model=%s count=%d",
+            endpoint,
+            cfg.embedding_model,
+            len(texts),
+        )
+        raise RuntimeError(
+            f"Ollama embed transport failure for model '{cfg.embedding_model}': {exc}"
+        ) from exc
+
+    payload = resp.json()
+    embeddings = payload.get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(texts):
+        raise RuntimeError(
+            f"Ollama returned {len(embeddings) if isinstance(embeddings, list) else 'no'} "
+            f"embeddings for {len(texts)} inputs (model '{cfg.embedding_model}')"
+        )
+    for vector in embeddings:
+        _validate_embedding(vector, cfg.embedding_model)
+    return embeddings
+
+
+async def embed(text: str, task: EmbedTask) -> list[float]:
+    """Embed a single text. ``task`` is "query" for a search input or "document"
+    for stored content (see embed_many)."""
+    vectors = await embed_many([text], task)
+    return vectors[0]
 
 
 async def _chat_request(
@@ -228,19 +295,41 @@ async def _chat_request(
     model: str | None,
     num_ctx: int | None,
     think: bool,
+    fmt: dict | str | None = None,
+    temperature: float | None = None,
+    num_predict: int | None = None,
 ) -> dict[str, Any]:
     """POST to Ollama /api/chat and return the raw response payload.
 
     When ``think`` is set we ask Ollama for separate reasoning output; models or
     Ollama builds that don't support the flag reject it, so we transparently
     retry once without it rather than failing the chat.
+
+    ``fmt`` constrains the output via Ollama's structured-output support — pass a
+    JSON schema dict (or the string ``"json"``) to get schema-valid JSON back in a
+    single call instead of parsing it out of free text. ``temperature`` sets the
+    sampling temperature (e.g. 0 for deterministic extraction/verification).
     """
     cfg = load_config()
     effective_model = model or cfg.chat_model
     endpoint = "/api/chat"
-    request_payload: dict[str, Any] = {"model": effective_model, "messages": messages, "stream": False}
+    request_payload: dict[str, Any] = {
+        "model": effective_model,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": cfg.ollama_keep_alive,
+    }
+    options: dict[str, Any] = {}
     if num_ctx and num_ctx > 0:
-        request_payload["options"] = {"num_ctx": num_ctx}
+        options["num_ctx"] = num_ctx
+    if temperature is not None:
+        options["temperature"] = temperature
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    if options:
+        request_payload["options"] = options
+    if fmt is not None:
+        request_payload["format"] = fmt
     if think:
         request_payload["think"] = True
     _logger.info(
@@ -249,65 +338,65 @@ async def _chat_request(
         effective_model,
         _loggable_payload(request_payload),
     )
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                started_at = _log_ollama_call_start(endpoint, effective_model)
-                resp = await client.post(
-                    f"{cfg.ollama_base_url}/api/chat",
-                    json=request_payload,
-                    timeout=cfg.chat_timeout_seconds,
-                )
-                resp.raise_for_status()
-                _log_ollama_call_end(started_at, endpoint, resp.status_code)
-            except httpx.HTTPStatusError as exc:
-                detail = _extract_ollama_error(exc)
-                # If the model can't do separate thinking, drop the flag and retry.
-                if request_payload.pop("think", None) and "think" in detail.lower():
-                    _logger.info(
-                        "ollama chat: model does not support think flag, retrying without it model=%s",
-                        effective_model,
-                    )
-                    continue
-                _logger.error(
-                    "ollama chat http error endpoint=%s model=%s detail=%s payload=%s",
-                    endpoint,
-                    effective_model,
-                    detail,
-                    _loggable_payload(request_payload),
-                )
-                raise RuntimeError(
-                    f"Ollama chat request failed for model '{effective_model}': {detail}"
-                ) from exc
-            except httpx.HTTPError as exc:
-                _logger.exception(
-                    "ollama chat transport error endpoint=%s model=%s payload=%s",
-                    endpoint,
-                    effective_model,
-                    _loggable_payload(request_payload),
-                )
-                raise RuntimeError(
-                    f"Ollama chat transport failure for model '{effective_model}': {exc}"
-                ) from exc
-
-            response_payload = resp.json()
-            content = response_payload.get("message", {}).get("content", "")
-            prompt_tokens, completion_tokens, total_tokens, estimated = _extract_chat_token_usage(
-                response_payload,
-                messages,
-                content,
+    client = _get_client()
+    while True:
+        try:
+            started_at = _log_ollama_call_start(endpoint, effective_model)
+            resp = await client.post(
+                f"{cfg.ollama_base_url}/api/chat",
+                json=request_payload,
+                timeout=cfg.chat_timeout_seconds,
             )
-            _logger.info(
-                "ollama chat response endpoint=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d usage_estimated=%s payload=%s",
+            resp.raise_for_status()
+            _log_ollama_call_end(started_at, endpoint, resp.status_code)
+        except httpx.HTTPStatusError as exc:
+            detail = _extract_ollama_error(exc)
+            # If the model can't do separate thinking, drop the flag and retry.
+            if request_payload.pop("think", None) and "think" in detail.lower():
+                _logger.info(
+                    "ollama chat: model does not support think flag, retrying without it model=%s",
+                    effective_model,
+                )
+                continue
+            _logger.error(
+                "ollama chat http error endpoint=%s model=%s detail=%s payload=%s",
                 endpoint,
                 effective_model,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                estimated,
-                _loggable_payload(response_payload),
+                detail,
+                _loggable_payload(request_payload),
             )
-            return response_payload
+            raise RuntimeError(
+                f"Ollama chat request failed for model '{effective_model}': {detail}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            _logger.exception(
+                "ollama chat transport error endpoint=%s model=%s payload=%s",
+                endpoint,
+                effective_model,
+                _loggable_payload(request_payload),
+            )
+            raise RuntimeError(
+                f"Ollama chat transport failure for model '{effective_model}': {exc}"
+            ) from exc
+
+        response_payload = resp.json()
+        content = response_payload.get("message", {}).get("content", "")
+        prompt_tokens, completion_tokens, total_tokens, estimated = _extract_chat_token_usage(
+            response_payload,
+            messages,
+            content,
+        )
+        _logger.info(
+            "ollama chat response endpoint=%s model=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d usage_estimated=%s payload=%s",
+            endpoint,
+            effective_model,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            estimated,
+            _loggable_payload(response_payload),
+        )
+        return response_payload
 
 
 async def chat_complete(
@@ -316,6 +405,31 @@ async def chat_complete(
     num_ctx: int | None = None,
 ) -> str:
     response_payload = await _chat_request(messages, model, num_ctx, think=False)
+    return response_payload.get("message", {}).get("content", "")
+
+
+async def chat_json(
+    messages: list[dict[str, str]],
+    schema: dict | None = None,
+    model: str | None = None,
+    num_ctx: int | None = None,
+    temperature: float = 0.0,
+    num_predict: int | None = None,
+) -> str:
+    """Chat with structured output. Returns the raw JSON string produced by the
+    model; pass a JSON schema to enforce a shape, or omit it for free-form JSON.
+    Defaults to temperature 0 since callers want deterministic, parseable output.
+    ``num_predict`` caps output length so a degenerate (looping) generation fails
+    fast instead of running until the request times out."""
+    response_payload = await _chat_request(
+        messages,
+        model,
+        num_ctx,
+        think=False,
+        fmt=schema if schema is not None else "json",
+        temperature=temperature,
+        num_predict=num_predict,
+    )
     return response_payload.get("message", {}).get("content", "")
 
 
@@ -331,15 +445,77 @@ async def chat_complete_with_thinking(
     return _split_thinking(message.get("content", ""), message.get("thinking"))
 
 
-async def list_models() -> list[str]:
+# Upper bound on tokens for a single page transcription. Generous for a dense
+# page, but caps a model that degenerates into a repetition loop so it fails fast
+# instead of generating until the request times out.
+_VISION_NUM_PREDICT = 4096
+
+
+async def chat_vision(
+    prompt: str,
+    images: list[bytes],
+    model: str | None = None,
+    num_ctx: int | None = None,
+    num_predict: int | None = _VISION_NUM_PREDICT,
+) -> str:
+    """Send a prompt plus one or more images to a multimodal model and return the
+    text response. Used to transcribe scanned/image medical documents."""
+    encoded = [base64.b64encode(img).decode("ascii") for img in images]
+    messages = [{"role": "user", "content": prompt, "images": encoded}]
+    response_payload = await _chat_request(
+        messages, model, num_ctx, think=False, num_predict=num_predict
+    )
+    return response_payload.get("message", {}).get("content", "")
+
+
+_EMBEDDING_NAME_RE = re.compile(r"embed|bge|minilm|gte", re.IGNORECASE)
+
+
+def _infer_capabilities(name: str) -> list[str]:
+    """Fallback classification when Ollama doesn't report capabilities (older
+    builds). Vision can't be inferred from a name, so name-only models are treated
+    as embedding or completion."""
+    return ["embedding"] if _EMBEDDING_NAME_RE.search(name) else ["completion"]
+
+
+async def _model_capabilities(name: str) -> list[str]:
+    """Capabilities for one model from /api/show (e.g. ["completion", "vision"],
+    ["embedding"]). Falls back to a name heuristic if the call fails or the build
+    doesn't report capabilities."""
     cfg = load_config()
-    endpoint = "/api/tags"
-    async with httpx.AsyncClient() as client:
-        started_at = _log_ollama_call_start(endpoint)
-        resp = await client.get(
-            f"{cfg.ollama_base_url}/api/tags",
+    try:
+        client = _get_client()
+        resp = await client.post(
+            f"{cfg.ollama_base_url}/api/show",
+            json={"model": name},
             timeout=cfg.meta_timeout_seconds,
         )
         resp.raise_for_status()
-        _log_ollama_call_end(started_at, endpoint, resp.status_code)
-        return [m["name"] for m in resp.json().get("models", [])]
+        caps = resp.json().get("capabilities")
+        if isinstance(caps, list):
+            caps = [c for c in caps if isinstance(c, str)]
+            if caps:
+                return caps
+    except httpx.HTTPError:
+        _logger.warning("could not fetch capabilities for model %s; inferring from name", name)
+    return _infer_capabilities(name)
+
+
+async def list_models() -> list[dict[str, Any]]:
+    """Return installed models with their capabilities:
+    ``[{"name": str, "capabilities": [str, ...]}, ...]``."""
+    cfg = load_config()
+    endpoint = "/api/tags"
+    client = _get_client()
+    started_at = _log_ollama_call_start(endpoint)
+    resp = await client.get(
+        f"{cfg.ollama_base_url}/api/tags",
+        timeout=cfg.meta_timeout_seconds,
+    )
+    resp.raise_for_status()
+    _log_ollama_call_end(started_at, endpoint, resp.status_code)
+    names = [m["name"] for m in resp.json().get("models", [])]
+
+    # Fetch each model's capabilities concurrently; /api/show is local metadata.
+    capabilities = await asyncio.gather(*(_model_capabilities(name) for name in names))
+    return [{"name": name, "capabilities": caps} for name, caps in zip(names, capabilities)]

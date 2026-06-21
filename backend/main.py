@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     await watcher.start_watcher()
     yield
     watcher.stop_watcher()
+    await ai.aclose_client()
 
 
 app = FastAPI(title="OpenHealth API", lifespan=lifespan)
@@ -309,6 +310,7 @@ class ConfigUpdateRequest(BaseModel):
     chat_model: Optional[str] = None
     clinical_model: Optional[str] = None
     verification_model: Optional[str] = None
+    vision_model: Optional[str] = None
     embedding_model: Optional[str] = None
     embed_timeout_seconds: Optional[float] = None
     chat_timeout_seconds: Optional[float] = None
@@ -319,6 +321,7 @@ class ConfigUpdateRequest(BaseModel):
     context_window_tokens: Optional[int] = None
     data_path: Optional[str] = None
     ollama_base_url: Optional[str] = None
+    ollama_keep_alive: Optional[str] = None
     routing_mode: Optional[str] = None
     medgemma_verification_enabled: Optional[bool] = None
     grounding_enabled: Optional[bool] = None
@@ -540,11 +543,12 @@ async def delete_patient(patient_id: str, body: DeletePatientRequest):
             f = folder_path / name
             if f.exists():
                 f.unlink(missing_ok=True)
-        # Remove .extracted files.
+        # Remove cached extraction + facts sidecars.
         uploads = folder_path / "uploads"
         if uploads.exists():
-            for ef in uploads.glob("*.extracted"):
-                ef.unlink(missing_ok=True)
+            for pattern in ("*.extracted", "*.facts.json"):
+                for ef in uploads.glob(pattern):
+                    ef.unlink(missing_ok=True)
 
     # If all patient content has been removed, delete the now-empty folder.
     if body.delete_uploads and body.delete_chats and body.delete_record_files:
@@ -844,7 +848,7 @@ async def chat(body: ChatRequest):
         doc_type = llm.classify_query(user_message)
 
         # 2. Retrieve relevant chat history (semantic memory).
-        query_embedding = await ai.embed(user_message)
+        query_embedding = await ai.embed(user_message, task="query")
         history_chunks = await memory.query_chat(
             patient_id, session_id, query_embedding, effective_memory_results
         )
@@ -986,7 +990,7 @@ async def chat(body: ChatRequest):
 
         # Embed and store the exchange in ChromaDB chat memory.
         exchange_text = f"User: {user_message}\nAssistant: {final_answer}"
-        exchange_embedding = await ai.embed(exchange_text)
+        exchange_embedding = await ai.embed(exchange_text, task="document")
         await memory.upsert_chat_exchange(
             patient_id=patient_id,
             session_id=session_id,
@@ -1111,7 +1115,14 @@ async def list_models():
 
 
 async def _startup_preflight() -> None:
-    await ai.ensure_ollama_available()
+    try:
+        await ai.ensure_ollama_available()
+    finally:
+        # The preflight runs on a temporary asyncio.run() loop that is torn down
+        # immediately after. Close the shared HTTP client here so its connection
+        # pool isn't carried — bound to this now-dead loop — into uvicorn's server
+        # loop, where reusing it fails with "Event loop is closed".
+        await ai.aclose_client()
 
 
 def main() -> int:
@@ -1121,11 +1132,19 @@ def main() -> int:
         _logger.error(str(exc))
         return 1
 
+    # Hot reload for development: uvicorn can only watch + reload when given the
+    # app as an import string ("main:app"), not the app instance. Enabled via
+    # BACKEND_RELOAD so production (which runs this same entrypoint) stays single
+    # process. reload_dirs scopes the watcher to the backend package so writes to
+    # the data folder don't trigger restarts.
+    reload_enabled = os.getenv("BACKEND_RELOAD", "").strip().lower() in ("1", "true", "yes", "on")
     uvicorn.run(
-        app,
+        "main:app" if reload_enabled else app,
         host=os.getenv("BACKEND_HOST", "127.0.0.1"),
         port=int(os.getenv("BACKEND_PORT", "8000")),
         log_level=os.getenv("BACKEND_LOG_LEVEL", "debug"),
+        reload=reload_enabled,
+        reload_dirs=[str(Path(__file__).parent)] if reload_enabled else None,
     )
     return 0
 

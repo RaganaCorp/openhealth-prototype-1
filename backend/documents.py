@@ -3,12 +3,17 @@ Text extraction, chunking, patient.md I/O, document type/date detection.
 
 Scan rules:
   - Top-level of uploads/ only (no subdirectories).
-  - Supported extensions: .pdf, .tif, .tiff, .txt, .html, .json
-  - Exclude *.extracted files (cached extraction sidecars).
+  - Supported extensions: .pdf, .tif, .tiff, .txt, .html, .json, .png, .jpg, .jpeg, .webp
+  - Exclude *.extracted and *.facts.json files (cached extraction sidecars).
+
+Image pages (standalone image files and image-only PDF/TIFF pages) are routed
+through a multimodal model via ``vision_fn`` when one is supplied, falling back
+to tesseract OCR otherwise.
 """
 
 import asyncio
 import html as html_module
+import io
 import json
 import os
 import re
@@ -19,17 +24,28 @@ from typing import Callable, Optional
 
 import fitz  # PyMuPDF
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageSequence
 
-SUPPORTED_EXTENSIONS = {".pdf", ".tif", ".tiff", ".txt", ".html", ".json"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTENSIONS = {".pdf", ".tif", ".tiff", ".txt", ".html", ".json"} | IMAGE_EXTENSIONS
+
+# Callable that turns an image (PNG/JPEG bytes) into transcribed text.
+VisionFn = Callable[[bytes], str]
 
 
 # ---------------------------------------------------------------------------
 # File scanning
 # ---------------------------------------------------------------------------
 
+def _is_sidecar(name: str) -> bool:
+    # Cached extraction artifacts live alongside the source files in uploads/.
+    # `.facts.json` ends in a supported extension (.json), so it must be excluded
+    # explicitly or it would be re-ingested as its own document.
+    return name.endswith(".extracted") or name.endswith(".facts.json")
+
+
 def scan_uploads(uploads_dir: Path) -> list[Path]:
-    """Return top-level supported files, excluding .extracted sidecars."""
+    """Return top-level supported files, excluding cached extraction sidecars."""
     if not uploads_dir.exists():
         return []
     return [
@@ -37,7 +53,7 @@ def scan_uploads(uploads_dir: Path) -> list[Path]:
         for f in uploads_dir.iterdir()
         if f.is_file()
         and f.suffix.lower() in SUPPORTED_EXTENSIONS
-        and not f.name.endswith(".extracted")
+        and not _is_sidecar(f.name)
     ]
 
 
@@ -49,6 +65,7 @@ def extract_text_sync(
     file_path: Path,
     extracted_path: Path,
     llm_json_fn: Optional[Callable[[str], str]] = None,
+    vision_fn: Optional[VisionFn] = None,
 ) -> str:
     """
     Return extracted text for a file.
@@ -58,7 +75,7 @@ def extract_text_sync(
     if extracted_path.exists():
         return extracted_path.read_text(encoding="utf-8")
 
-    text = _extract_raw(file_path, llm_json_fn)
+    text = _extract_raw(file_path, llm_json_fn, vision_fn)
     extracted_path.write_text(text, encoding="utf-8")
     return text
 
@@ -67,9 +84,10 @@ def overwrite_extracted_sidecar(
     file_path: Path,
     extracted_path: Path,
     llm_json_fn: Optional[Callable[[str], str]] = None,
+    vision_fn: Optional[VisionFn] = None,
 ) -> str:
     """Re-extract and overwrite the sidecar (used when file has changed)."""
-    text = _extract_raw(file_path, llm_json_fn)
+    text = _extract_raw(file_path, llm_json_fn, vision_fn)
     extracted_path.write_text(text, encoding="utf-8")
     return text
 
@@ -77,12 +95,15 @@ def overwrite_extracted_sidecar(
 def _extract_raw(
     file_path: Path,
     llm_json_fn: Optional[Callable[[str], str]] = None,
+    vision_fn: Optional[VisionFn] = None,
 ) -> str:
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
-        return _extract_pdf(file_path)
+        return _extract_pdf(file_path, vision_fn)
     if suffix in (".tif", ".tiff"):
-        return _extract_tiff(file_path)
+        return _extract_tiff(file_path, vision_fn)
+    if suffix in IMAGE_EXTENSIONS:
+        return _extract_image(file_path, vision_fn)
     if suffix == ".txt":
         return file_path.read_text(encoding="utf-8", errors="replace")
     if suffix == ".html":
@@ -92,24 +113,117 @@ def _extract_raw(
     return ""
 
 
-def _extract_pdf(file_path: Path) -> str:
+# Cap the longest edge of an image before sending it to the vision model. Scanned
+# pages are often far larger than the model's internal input resolution, so the
+# extra pixels only slow inference (and risk timeouts) without improving the
+# transcription.
+_VISION_MAX_EDGE = 2048
+
+# High-bit-depth modes whose values span beyond 0-255. PIL's direct convert to
+# "L"/"RGB" clips instead of rescaling, which washes a 16-bit scanned document out
+# to near-white and makes it unreadable (to OCR and to the vision model alike).
+_HIGH_BIT_MODES = {"I", "I;16", "I;16B", "I;16L", "I;16N", "F"}
+
+
+def _to_8bit(img: Image.Image) -> Image.Image:
+    """Normalize a high-bit-depth image to 8-bit grayscale by linearly stretching
+    its actual value range to 0-255. 8-bit images pass through unchanged."""
+    if img.mode not in _HIGH_BIT_MODES:
+        return img
+    src = img.convert("I")
+    lo, hi = src.getextrema()
+    if hi > lo:
+        # point() on mode "I" only accepts a linear scale+offset expression, so
+        # express the stretch as (v - lo) * scale without any wrapping calls.
+        scale = 255.0 / (hi - lo)
+        src = src.point(lambda v: (v - lo) * scale)
+    return src.convert("L")
+
+
+def _encode_for_vision(img: Image.Image) -> bytes:
+    rgb = _to_8bit(img).convert("RGB")
+    longest = max(rgb.size)
+    if longest > _VISION_MAX_EDGE:
+        scale = _VISION_MAX_EDGE / longest
+        rgb = rgb.resize((max(1, round(rgb.width * scale)), max(1, round(rgb.height * scale))))
+    buf = io.BytesIO()
+    rgb.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _collapse_repeats(text: str, max_period: int = 16, min_repeats: int = 4) -> str:
+    """Collapse runaway repetition to a single copy: a block of 1..max_period
+    consecutive lines repeated >= min_repeats times is reduced to one occurrence.
+    Vision transcription of small models can degenerate into a loop — sometimes a
+    single line, sometimes a multi-line section block (the observed case was an
+    8-line FINDINGS/COMPARISON/TECHNIQUE/IMPRESSION cycle) — so the period window
+    must be comfortably larger than a section block to catch it."""
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        collapsed = False
+        for period in range(1, max_period + 1):
+            block = lines[i:i + period]
+            if len(block) < period:
+                break
+            reps = 1
+            j = i + period
+            while j + period <= n and lines[j:j + period] == block:
+                reps += 1
+                j += period
+            if reps >= min_repeats:
+                out.extend(block)
+                i = j
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def _transcribe(vision_fn: VisionFn, image_bytes: bytes) -> str:
+    """Run vision transcription and strip any runaway repetition from the result."""
+    return _collapse_repeats(vision_fn(image_bytes))
+
+
+def _extract_pdf(file_path: Path, vision_fn: Optional[VisionFn] = None) -> str:
     doc = fitz.open(str(file_path))
     pages: list[str] = []
     for page in doc:
+        # Page triage: pages with a real text layer are read directly (no model);
+        # only image-only pages go to vision/OCR.
         text = page.get_text().strip()
         if text:
             pages.append(text)
+        elif vision_fn is not None:
+            pix = page.get_pixmap(dpi=200)
+            pages.append(_transcribe(vision_fn, pix.tobytes("png")))
         else:
-            # OCR fallback for scanned/image pages.
             tp = page.get_textpage_ocr()
             pages.append(tp.extractText())
     doc.close()
     return "\n\n".join(pages)
 
 
-def _extract_tiff(file_path: Path) -> str:
+def _extract_tiff(file_path: Path, vision_fn: Optional[VisionFn] = None) -> str:
     img = Image.open(str(file_path))
-    return pytesseract.image_to_string(img)
+    pages: list[str] = []
+    for frame in ImageSequence.Iterator(img):
+        if vision_fn is not None:
+            pages.append(_transcribe(vision_fn, _encode_for_vision(frame)))
+        else:
+            pages.append(pytesseract.image_to_string(_to_8bit(frame)))
+    return "\n\n".join(pages)
+
+
+def _extract_image(file_path: Path, vision_fn: Optional[VisionFn] = None) -> str:
+    img = Image.open(file_path)
+    if vision_fn is not None:
+        return _transcribe(vision_fn, _encode_for_vision(img))
+    return pytesseract.image_to_string(_to_8bit(img))
 
 
 def _extract_html(file_path: Path) -> str:

@@ -45,6 +45,48 @@ JSON CONTENT:
 
 
 # ---------------------------------------------------------------------------
+# Vision transcription
+# ---------------------------------------------------------------------------
+
+# Used to turn a scanned/image page into clean clinical text, which then flows
+# through the normal text → chunks → structured-extraction pipeline.
+VISION_TRANSCRIPTION_PROMPT = (
+    "You are transcribing a scanned medical document image. Output the full text "
+    "content exactly as it appears — preserve every clinical value, unit, reference "
+    "range, date, and label, and keep table rows and columns aligned as best you can. "
+    "Do not summarize, interpret, translate, or add anything. Output only the "
+    "transcribed text."
+)
+
+
+# ---------------------------------------------------------------------------
+# Structured clinical extraction
+# ---------------------------------------------------------------------------
+
+# Runs once per document over its cleaned text. Output is constrained to the
+# DocumentFacts JSON schema via Ollama structured outputs, so the prompt carries
+# instructions only (no literal JSON braces to escape).
+STRUCTURED_EXTRACTION_PROMPT = """\
+You are a clinical data extractor. Extract structured medical facts from the document below.
+
+Rules:
+- Only include facts explicitly present in the document. Do not infer, guess, or invent.
+- Preserve values exactly as written, including qualifiers like "<5", "Negative", or ranges.
+- For each lab result, also provide canonical_name: a standardized lowercase name for the
+  test (e.g. "ldl cholesterol" for "LDL", "LDL-C", or "Cholesterol, LDL") so the same test
+  from different sources can be matched. Normalize the unit to a standard form.
+- document_date is the single clinically relevant date of THIS document: when the labs were
+  collected, the visit occurred, or the report was issued. Set document_date_type to one of
+  collected, resulted, visit, reported, or unknown.
+- {dob_hint}
+- Use ISO format (YYYY-MM-DD) for all dates where possible; otherwise leave the date empty.
+
+DOCUMENT TEXT:
+{document_text}
+"""
+
+
+# ---------------------------------------------------------------------------
 # Grounding verification
 # ---------------------------------------------------------------------------
 

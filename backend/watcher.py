@@ -35,12 +35,15 @@ _watches: dict[str, object] = {}
 
 class _UploadsHandler(PatternMatchingEventHandler):
     def __init__(self, patient_id: str, uploads_dir: Path):
-        # Watch supported extensions; ignore .extracted sidecars.
+        # Watch supported extensions; ignore cached extraction sidecars. The
+        # *.facts.json ignore must come before the generic *.json match so writing
+        # a facts sidecar doesn't retrigger ingestion.
         super().__init__(
             patterns=[
                 "*.pdf", "*.tif", "*.tiff", "*.txt", "*.html", "*.json",
+                "*.png", "*.jpg", "*.jpeg", "*.webp",
             ],
-            ignore_patterns=["*.extracted"],
+            ignore_patterns=["*.extracted", "*.facts.json"],
             ignore_directories=True,
             case_sensitive=False,
         )

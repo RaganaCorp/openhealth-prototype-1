@@ -13,22 +13,21 @@ session token from a stable hash to stay under the limit.
 
 import asyncio
 import hashlib
-import importlib.util
 import logging
 import os
 import re
 import threading
 from typing import Any, Optional
 
-# Disable Chroma telemetry explicitly; some builds still emit telemetry events
-# even when anonymized_telemetry is false.
+# Chroma product telemetry is opt-out (disabled below), but this chromadb build
+# still calls a newer, incompatible PostHog client and logs a benign
+# "Failed to send telemetry event ... capture() takes 1 positional argument but 3
+# were given" on every Chroma operation — the TypeError is raised before PostHog
+# checks its disabled flag, so disabling telemetry alone doesn't stop it. Silence
+# the telemetry logger so this noise (which has no effect on storage) stays out of
+# the logs.
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
-
-# The null telemetry implementation module does not exist in all Chroma versions.
-# Only set telemetry implementation overrides when that module is available.
-if importlib.util.find_spec("chromadb.telemetry.product.null") is not None:
-    os.environ.setdefault("CHROMA_PRODUCT_TELEMETRY_IMPL", "chromadb.telemetry.product.null.NullTelemetry")
-    os.environ.setdefault("CHROMA_TELEMETRY_IMPL", "chromadb.telemetry.product.null.NullTelemetry")
+logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
 
 import chromadb
 from chromadb.config import Settings

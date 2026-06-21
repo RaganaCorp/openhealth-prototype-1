@@ -7,6 +7,7 @@ for a local single-user app (the UI polls while the process is running).
 """
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -16,9 +17,11 @@ from typing import Optional
 
 import ai
 import documents as docs_module
+import extraction
 import llm
 import memory
 import patients as pt
+import prompts
 from config import load_config
 
 _logger = logging.getLogger("uvicorn.error")
@@ -97,13 +100,16 @@ def _prune_finished_jobs() -> None:
         _jobs.pop(jid, None)
 
 
-def _create_job(patient_id: str) -> dict:
+def _create_job(patient_id: str, operation: str = "ingestion") -> dict:
     _prune_finished_jobs()
     job_id = str(uuid.uuid4())
     started_at = _now()
     job = {
         "job_id": job_id,
         "patient_id": patient_id,
+        # What kind of work this job does — drives how the UI presents it
+        # ("ingestion" / "rebuild" show full progress; "deletion" shows a slim chip).
+        "operation": operation,
         "status": "running",
         "total": 0,
         "processed": 0,
@@ -160,18 +166,12 @@ def _fail_job(job: dict, error: str = "") -> None:
 # Ingestion helpers
 # ---------------------------------------------------------------------------
 
-# Bound on concurrent embedding requests per document. Embedding each chunk is an
-# independent Ollama round-trip, so we issue them in parallel instead of strictly
-# one-at-a-time; the cap keeps us from overwhelming a local Ollama instance.
-_EMBED_CONCURRENCY = 8
-
-
 async def _embed_and_upsert_chunks(
     patient_id: str,
     doc_record: dict,
     text: str,
 ) -> None:
-    """Chunk text, embed the chunks concurrently, upsert into the ChromaDB _docs collection."""
+    """Chunk text, embed all chunks in one batched call, upsert into the ChromaDB _docs collection."""
     cfg = load_config()
     chunks = docs_module.chunk_text(text, cfg.chunk_size, cfg.chunk_overlap)
 
@@ -182,16 +182,9 @@ async def _embed_and_upsert_chunks(
     if not chunks:
         return
 
-    semaphore = asyncio.Semaphore(_EMBED_CONCURRENCY)
-
-    async def _embed_one(chunk: str) -> list[float]:
-        async with semaphore:
-            return await ai.embed(chunk)
-
-    # gather preserves order, so embeddings[i] corresponds to chunks[i].
-    embeddings: list[list[float]] = await asyncio.gather(
-        *(_embed_one(chunk) for chunk in chunks)
-    )
+    # embed_many returns vectors in input order, so embeddings[i] matches chunks[i].
+    # These are stored content, so embed them with the "document" retrieval prefix.
+    embeddings: list[list[float]] = await ai.embed_many(chunks, task="document")
 
     chunk_ids = [f"{doc_record['id']}_chunk_{i}" for i in range(len(chunks))]
     metadatas = [
@@ -232,17 +225,65 @@ def _file_changed(file_path: Path, doc_record: dict) -> bool:
     )
 
 
+# Slack added on top of the model HTTP timeout when waiting on a threaded->async
+# call. The HTTP request itself times out at chat_timeout_seconds, so the bridge
+# must wait a little longer — otherwise it abandons the call early with a bare
+# TimeoutError (and leaves the request running, orphaned, on the event loop).
+_BRIDGE_TIMEOUT_SLACK_SECONDS = 30
+
+
 async def _make_llm_json_fn():
     """Return a sync callable that uses the event loop to run LLM JSON extraction."""
     loop = asyncio.get_event_loop()
+    timeout = load_config().chat_timeout_seconds + _BRIDGE_TIMEOUT_SLACK_SECONDS
 
     def llm_json_fn(json_content: str) -> str:
         future = asyncio.run_coroutine_threadsafe(
             llm.extract_json_document(json_content), loop
         )
-        return future.result(timeout=300)
+        return future.result(timeout=timeout)
 
     return llm_json_fn
+
+
+async def _make_vision_fn():
+    """Return a sync callable that transcribes an image (PNG/JPEG bytes) to text via
+    the multimodal model, bridging the threaded extraction code back to the event loop."""
+    loop = asyncio.get_event_loop()
+    cfg = load_config()
+    timeout = cfg.chat_timeout_seconds + _BRIDGE_TIMEOUT_SLACK_SECONDS
+
+    def vision_fn(image_bytes: bytes) -> str:
+        future = asyncio.run_coroutine_threadsafe(
+            ai.chat_vision(
+                prompts.VISION_TRANSCRIPTION_PROMPT, [image_bytes], model=cfg.vision_model
+            ),
+            loop,
+        )
+        return future.result(timeout=timeout)
+
+    return vision_fn
+
+
+async def _load_or_extract_facts(
+    text: str,
+    facts_path: Path,
+    regenerate: bool,
+    patient_dob: Optional[str],
+) -> dict:
+    """Return structured clinical facts for a document, reusing the .facts.json
+    sidecar unless regeneration is forced (i.e. the text was just re-extracted)."""
+    if not regenerate and facts_path.exists():
+        try:
+            raw = await asyncio.to_thread(facts_path.read_text, encoding="utf-8")
+            return json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            _logger.warning("could not read facts sidecar %s; re-extracting", facts_path)
+    facts = await extraction.extract_facts(text, patient_dob)
+    await asyncio.to_thread(
+        facts_path.write_text, json.dumps(facts, indent=2), encoding="utf-8"
+    )
+    return facts
 
 
 async def _process_file(
@@ -250,13 +291,16 @@ async def _process_file(
     file_path: Path,
     existing_doc: Optional[dict],
     is_rebuild: bool,
+    patient_dob: Optional[str] = None,
 ) -> dict:
     """
-    Extract, embed, and return an updated document record for one file.
-    Overwrites .extracted sidecar if file has changed or is being rebuilt.
+    Extract text + structured facts, embed, and return an updated document record.
+    Overwrites the .extracted / .facts.json sidecars if the file changed or is being rebuilt.
     """
     extracted_path = file_path.with_suffix(file_path.suffix + ".extracted")
+    facts_path = file_path.with_suffix(file_path.suffix + ".facts.json")
     llm_json_fn = await _make_llm_json_fn()
+    vision_fn = await _make_vision_fn()
 
     # Stat BEFORE extraction. If the file is still being copied in while we
     # extract (the watcher fires on creation), recording the pre-extraction
@@ -264,13 +308,15 @@ async def _process_file(
     # stat'ing afterwards would permanently freeze the truncated extraction.
     pre_stat = await asyncio.to_thread(file_path.stat)
 
-    # Determine if we need to re-extract.
-    if is_rebuild or (existing_doc and _file_changed(file_path, existing_doc)):
+    # Determine if we need to re-extract; the same decision gates fact regeneration.
+    needs_reextract = is_rebuild or bool(existing_doc and _file_changed(file_path, existing_doc))
+    if needs_reextract:
         text = await asyncio.to_thread(
             docs_module.overwrite_extracted_sidecar,
             file_path,
             extracted_path,
             llm_json_fn,
+            vision_fn,
         )
     else:
         text = await asyncio.to_thread(
@@ -278,10 +324,18 @@ async def _process_file(
             file_path,
             extracted_path,
             llm_json_fn,
+            vision_fn,
         )
 
+    facts = await _load_or_extract_facts(
+        text, facts_path, regenerate=needs_reextract, patient_dob=patient_dob
+    )
+
     doc_type = docs_module.detect_document_type(file_path.name, text)
-    date_detected = docs_module.detect_date(text)
+    # Prefer the extractor's clinically-typed document_date (which is told not to
+    # use the patient's DOB) over the regex date scan, which can latch onto a DOB
+    # or a print date.
+    date_detected = facts.get("document_date") or docs_module.detect_date(text)
 
     doc_record = existing_doc.copy() if existing_doc else {
         "id": str(uuid.uuid4()),
@@ -296,10 +350,41 @@ async def _process_file(
         "ingested_at": _now(),
         "mtime": pre_stat.st_mtime,
         "size": pre_stat.st_size,
+        "status": "ok",
+        # Clear any error from a prior failed attempt now that this succeeded.
+        "error": None,
+        "facts": facts,
     })
 
     await _embed_and_upsert_chunks(patient_id, doc_record, text)
     return doc_record
+
+
+def _errored_doc_record(
+    patient_id: str, existing_doc: Optional[dict], file_path: Path, error: str
+) -> dict:
+    """Build a placeholder record for a file whose ingestion failed, so the file
+    stays visible in the UI (instead of silently vanishing) with its error.
+
+    Deliberately omits mtime/size: leaving them unset makes the next scan treat
+    the file as changed and re-attempt it, so a transient failure (e.g. the model
+    was briefly unavailable) self-heals on the next ingest."""
+    record = existing_doc.copy() if existing_doc else {
+        "id": str(uuid.uuid4()),
+        "patient_id": patient_id,
+    }
+    record.update({
+        "filename": file_path.name,
+        "file_path": f"./uploads/{file_path.name}",
+        "date_detected": record.get("date_detected", "unknown"),
+        "document_type": record.get("document_type", "unknown"),
+        "ingested_at": _now(),
+        "status": "error",
+        "error": error[:500],
+    })
+    record.pop("mtime", None)
+    record.pop("size", None)
+    return record
 
 
 def _rebuild_patient_md(patient_folder: Path, doc_records: list[dict]) -> None:
@@ -345,7 +430,7 @@ def _schedule_followup_if_pending(patient_id: str) -> None:
     kind = _patient_pending.pop(patient_id, None)
     if kind is None:
         return
-    job = _create_job(patient_id)
+    job = _create_job(patient_id, "rebuild" if kind == "rebuild" else "ingestion")
     if kind == "rebuild":
         _spawn(_run_rebuild(patient_id, job))
     else:
@@ -366,7 +451,7 @@ async def start_incremental_ingestion(
     if active is not None:
         _request_followup(patient_id, "incremental")
         return active
-    job = _create_job(patient_id)
+    job = _create_job(patient_id, "ingestion")
     _spawn(_run_incremental(patient_id, job, target_filenames))
     return job
 
@@ -379,7 +464,7 @@ async def start_full_rebuild(patient_id: str) -> dict:
     if active is not None:
         _request_followup(patient_id, "rebuild")
         return active
-    job = _create_job(patient_id)
+    job = _create_job(patient_id, "rebuild")
     _spawn(_run_rebuild(patient_id, job))
     return job
 
@@ -394,7 +479,7 @@ async def start_document_deletion(patient_id: str, document_id: str) -> Optional
     safely coalesced like a refresh."""
     if get_active_job(patient_id) is not None:
         return None
-    job = _create_job(patient_id)
+    job = _create_job(patient_id, "deletion")
     _spawn(_run_document_deletion(patient_id, job, document_id))
     return job
 
@@ -402,6 +487,41 @@ async def start_document_deletion(patient_id: str, document_id: str) -> Optional
 # ---------------------------------------------------------------------------
 # Background task implementations
 # ---------------------------------------------------------------------------
+
+async def _persist_documents(
+    patient_id: str, patient_folder: Path, job: dict, all_docs: list[dict]
+) -> None:
+    """Persist document records (including any errored placeholders) to patient.json
+    and rebuild patient.md from only the successfully-processed documents. Called
+    even when some files failed, so successful work is never discarded."""
+    good_docs = [d for d in all_docs if d.get("status") != "error"]
+
+    _set_phase(job, "rebuilding_patient_md", "patient.md")
+    async with pt.record_lock(patient_id):
+        await asyncio.to_thread(_rebuild_patient_md, patient_folder, good_docs)
+
+    # Persist only owned fields via mutate_patient_record so a concurrent chat write
+    # (e.g. session conversation_state updates) on the same record is not clobbered.
+    def _apply(r: dict) -> None:
+        r["documents"] = all_docs
+
+    _set_phase(job, "saving", "patient.json")
+    await pt.mutate_patient_record(patient_id, _apply)
+    await pt.update_ingestion_stats(patient_id, len(good_docs))
+
+
+def _finalize_job(job: dict, failed_files: list[str]) -> None:
+    """Mark the job complete, or failed if any file could not be processed. Either
+    way the successful documents have already been persisted by _persist_documents,
+    and each failed file is recorded as an errored document the user can see."""
+    if failed_files:
+        _fail_job(
+            job,
+            f"{len(failed_files)} file(s) could not be processed: {', '.join(failed_files)}",
+        )
+    else:
+        _complete_job(job)
+
 
 async def _run_incremental(
     patient_id: str,
@@ -427,6 +547,7 @@ async def _run_incremental(
         existing_docs: dict[str, dict] = {
             d["filename"]: d for d in record.get("documents", [])
         }
+        patient_dob = (record.get("profile") or {}).get("dob")
 
         all_files = await asyncio.to_thread(docs_module.scan_uploads, uploads_dir)
         target_file_set = set(target_filenames or [])
@@ -444,33 +565,28 @@ async def _run_incremental(
         _set_phase(job, "processing_files")
 
         updated_docs: dict[str, dict] = {**existing_docs}
+        failed_files: list[str] = []
 
         for file_path, existing_doc in files_to_process:
             job["current_file"] = file_path.name
-            doc_record = await _process_file(
-                patient_id, file_path, existing_doc, is_rebuild=False
-            )
+            # Process each file independently: one bad file must not discard the
+            # whole batch (and with it every already-processed file). Record the
+            # failure as an errored document so it stays visible and retries later.
+            try:
+                doc_record = await _process_file(
+                    patient_id, file_path, existing_doc, is_rebuild=False, patient_dob=patient_dob
+                )
+            except Exception as exc:
+                _logger.exception(
+                    "ingestion failed for file %s patient_id=%s", file_path.name, patient_id
+                )
+                failed_files.append(file_path.name)
+                doc_record = _errored_doc_record(patient_id, existing_doc, file_path, str(exc))
             updated_docs[doc_record["filename"]] = doc_record
             job["processed"] += 1
 
-        # Rebuild patient.md from all documents, under the per-patient lock so
-        # a concurrent record edit can't interleave with the rebuild.
-        _set_phase(job, "rebuilding_patient_md", "patient.md")
-        all_doc_records = list(updated_docs.values())
-        async with pt.record_lock(patient_id):
-            await asyncio.to_thread(_rebuild_patient_md, patient_folder, all_doc_records)
-
-        # Update patient.json. Persist only owned fields via mutate_patient_record
-        # so a concurrent chat write (e.g. session conversation_state updates) on the same record
-        # is not clobbered.
-        def _apply(r: dict) -> None:
-            r["documents"] = all_doc_records
-
-        _set_phase(job, "saving", "patient.json")
-        await pt.mutate_patient_record(patient_id, _apply)
-        await pt.update_ingestion_stats(patient_id, len(all_doc_records))
-
-        _complete_job(job)
+        await _persist_documents(patient_id, patient_folder, job, list(updated_docs.values()))
+        _finalize_job(job, failed_files)
 
     except asyncio.CancelledError:
         # CancelledError is BaseException, not Exception, so it would otherwise
@@ -481,6 +597,7 @@ async def _run_incremental(
         _fail_job(job, "cancelled")
         raise
     except Exception as e:
+        _logger.exception("ingestion job failed patient_id=%s job_id=%s", patient_id, job["job_id"])
         _fail_job(job, str(e))
     finally:
         _schedule_followup_if_pending(patient_id)
@@ -509,32 +626,31 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         if record is None:
             _fail_job(job, "patient.json not found")
             return
+        patient_dob = (record.get("profile") or {}).get("dob")
 
         all_files = await asyncio.to_thread(docs_module.scan_uploads, uploads_dir)
         job["total"] = len(all_files)
         _set_phase(job, "processing_files")
 
         new_docs: list[dict] = []
+        failed_files: list[str] = []
         for file_path in all_files:
             job["current_file"] = file_path.name
-            doc_record = await _process_file(
-                patient_id, file_path, None, is_rebuild=True
-            )
+            try:
+                doc_record = await _process_file(
+                    patient_id, file_path, None, is_rebuild=True, patient_dob=patient_dob
+                )
+            except Exception as exc:
+                _logger.exception(
+                    "ingestion failed for file %s patient_id=%s", file_path.name, patient_id
+                )
+                failed_files.append(file_path.name)
+                doc_record = _errored_doc_record(patient_id, None, file_path, str(exc))
             new_docs.append(doc_record)
             job["processed"] += 1
 
-        _set_phase(job, "rebuilding_patient_md", "patient.md")
-        async with pt.record_lock(patient_id):
-            await asyncio.to_thread(_rebuild_patient_md, patient_folder, new_docs)
-
-        def _apply(r: dict) -> None:
-            r["documents"] = new_docs
-
-        _set_phase(job, "saving", "patient.json")
-        await pt.mutate_patient_record(patient_id, _apply)
-        await pt.update_ingestion_stats(patient_id, len(new_docs))
-
-        _complete_job(job)
+        await _persist_documents(patient_id, patient_folder, job, new_docs)
+        _finalize_job(job, failed_files)
 
     except asyncio.CancelledError:
         # CancelledError is BaseException, not Exception, so it would otherwise
@@ -545,6 +661,7 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
         _fail_job(job, "cancelled")
         raise
     except Exception as e:
+        _logger.exception("ingestion job failed patient_id=%s job_id=%s", patient_id, job["job_id"])
         _fail_job(job, str(e))
     finally:
         _schedule_followup_if_pending(patient_id)
@@ -574,12 +691,13 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
         uploads_dir = patient_folder / "uploads"
         job["total"] = 1
 
-        # 1. Delete the source file and its cached extraction sidecar.
+        # 1. Delete the source file and its cached extraction + facts sidecars.
         filename = doc.get("filename")
         _set_phase(job, "deleting_files", filename)
         if isinstance(filename, str) and filename:
             (uploads_dir / filename).unlink(missing_ok=True)
             (uploads_dir / f"{filename}.extracted").unlink(missing_ok=True)
+            (uploads_dir / f"{filename}.facts.json").unlink(missing_ok=True)
 
         # 2. Drop only this document's chunks from the vector store.
         _set_phase(job, "removing_chunks")
@@ -611,6 +729,7 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
         _fail_job(job, "cancelled")
         raise
     except Exception as e:
+        _logger.exception("ingestion job failed patient_id=%s job_id=%s", patient_id, job["job_id"])
         _fail_job(job, str(e))
     finally:
         _schedule_followup_if_pending(patient_id)
