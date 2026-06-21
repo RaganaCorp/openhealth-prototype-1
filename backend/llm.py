@@ -1,8 +1,7 @@
 """
 Higher-level LLM helpers built on top of the ai.py provider client: provider
-JSON document extraction, grounding verification, conversation-state updates,
-session titles, and query classification. Functions that call the model do so
-via ai.chat_complete; JSON responses are parsed from code-fenced LLM output.
+JSON document extraction, grounding verification, rolling conversation
+summarization, and session titles.
 """
 
 import json
@@ -10,6 +9,8 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+
+from pydantic import BaseModel
 
 import ai
 import prompts
@@ -36,30 +37,10 @@ def _parse_json_response(text: str, fallback: Any = None) -> Any:
         return fallback
 
 
-def _normalize_ws(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _trim_chars(text: str, max_chars: int) -> str:
-    normalized = _normalize_ws(text)
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max_chars - 1].rstrip() + "..."
-
-
-def _unique_keep_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in items:
-        normalized = _normalize_ws(item)
-        if not normalized:
-            continue
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(normalized)
-    return out
+class _ConversationState(BaseModel):
+    rolling_summary: str = ""
+    active_topics: list[str] = []
+    open_questions: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -88,64 +69,35 @@ async def update_conversation_state(
     user_message: str,
     assistant_response: str,
 ) -> dict:
-    """Refresh conversation state with lightweight local heuristics."""
+    """Refresh the rolling conversation summary via a small structured LLM call (on
+    the fast chat model). Falls back to the prior state on any failure so a chat
+    turn never breaks on the summary step."""
     prior = prior_state if isinstance(prior_state, dict) else {}
-    prior_summary = str(prior.get("rolling_summary", "") or "")
-
-    turn_summary = (
-        f"User asked: {_trim_chars(user_message, 180)} "
-        f"Assistant answered: {_trim_chars(assistant_response, 260)}"
+    prompt = prompts.CONVERSATION_SUMMARY_PROMPT.format(
+        prior_summary=(prior.get("rolling_summary") or "(none)"),
+        prior_open_questions="; ".join(prior.get("open_questions") or []) or "(none)",
+        user_message=user_message,
+        assistant_response=assistant_response[:1200],
     )
-    rolling_summary = _normalize_ws(f"{prior_summary} {turn_summary}").strip()
-    rolling_summary = _trim_chars(rolling_summary, 1800)
-
-    prior_topics = prior.get("active_topics", [])
-    active_topics: list[str] = []
-    if isinstance(prior_topics, list):
-        for topic in prior_topics:
-            if isinstance(topic, str) and topic.strip():
-                active_topics.append(_trim_chars(topic, 80))
-
-    doc_type = classify_query(user_message)
-    if doc_type != "unknown":
-        active_topics.append(doc_type)
-    active_topics = _unique_keep_order(active_topics)[-6:]
-
-    prior_open = prior.get("open_questions", [])
-    open_questions: list[str] = []
-    if isinstance(prior_open, list):
-        for question in prior_open:
-            if isinstance(question, str) and question.strip():
-                open_questions.append(_trim_chars(question, 180))
-
-    current_question = _trim_chars(user_message, 180) if "?" in user_message else None
-    if current_question:
-        open_questions.append(current_question)
-    open_questions = _unique_keep_order(open_questions)
-
-    lowered_answer = assistant_response.lower()
-    unresolved_markers = [
-        "no clear evidence",
-        "insufficient evidence",
-        "not enough information",
-        "uncertain",
-    ]
-    answer_is_direct = not any(marker in lowered_answer for marker in unresolved_markers)
-    if answer_is_direct and current_question:
-        # A direct answer resolves only THIS turn's question. Drop just that one
-        # and keep the rest — previously the code truncated to the single most
-        # recent question, silently discarding genuinely unresolved ones whenever
-        # the model phrased its hedge differently than the marker list expects.
-        open_questions = [q for q in open_questions if q != current_question]
-    open_questions = open_questions[-4:]
-
-    now = datetime.now(timezone.utc).isoformat()
-    return {
-        "rolling_summary": rolling_summary,
-        "active_topics": active_topics,
-        "open_questions": open_questions,
-        "last_updated_at": now,
+    state = {
+        "rolling_summary": prior.get("rolling_summary") or "",
+        "active_topics": list(prior.get("active_topics") or []),
+        "open_questions": list(prior.get("open_questions") or []),
     }
+    try:
+        response = await ai.chat_json(
+            [{"role": "user", "content": prompt}],
+            schema=_ConversationState.model_json_schema(),
+            num_predict=512,
+        )
+        state = _ConversationState.model_validate(json.loads(response)).model_dump()
+    except Exception:
+        _logger.warning("conversation summary update failed; keeping prior state", exc_info=True)
+
+    state["active_topics"] = [t for t in state.get("active_topics", []) if isinstance(t, str) and t.strip()][:8]
+    state["open_questions"] = [q for q in state.get("open_questions", []) if isinstance(q, str) and q.strip()][:6]
+    state["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+    return state
 
 
 async def verify_grounding(
@@ -202,22 +154,3 @@ async def generate_session_title(
     )
     title = await ai.chat_complete([{"role": "user", "content": title_prompt}], model=model)
     return title.strip().strip('"').strip("'")[:80]
-
-
-def classify_query(query: str) -> str:
-    """
-    Keyword-based query classifier — no LLM needed.
-    Returns a document_type string used to guide chunk retrieval.
-    """
-    q = query.lower()
-    if any(w in q for w in ["lab", "result", "blood", "panel", "urine", "culture", "pathology", "test"]):
-        return "lab result"
-    if any(w in q for w in ["discharge", "hospital", "admission", "hospitalized"]):
-        return "discharge summary"
-    if any(w in q for w in ["imaging", "mri", "ct", "x-ray", "xray", "ultrasound", "scan", "radiology"]):
-        return "imaging"
-    if any(w in q for w in ["medication", "drug", "prescription", "dosage", "dose", "pharmacy", "rx"]):
-        return "prescription"
-    if any(w in q for w in ["note", "visit", "encounter", "assessment", "soap", "progress"]):
-        return "clinical note"
-    return "unknown"

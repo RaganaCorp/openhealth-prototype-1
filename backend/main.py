@@ -464,6 +464,104 @@ def serialize_profile(profile: Optional[dict]) -> str:
     return "PATIENT PROFILE\n" + "\n".join(lines)
 
 
+def _uniq_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        normalized = (item or "").strip()
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            out.append(normalized)
+    return out
+
+
+def _latest_by_name(entries: list[tuple]) -> list[tuple]:
+    """From (name, value, unit, date) tuples keep the most recent per name, newest first."""
+    best: dict[str, tuple] = {}
+    for name, value, unit, date in entries:
+        key = name.strip().lower()
+        cur = best.get(key)
+        if cur is None or (date or "") > (cur[3] or ""):
+            best[key] = (name.strip(), value, unit, date)
+    return sorted(best.values(), key=lambda e: (e[3] or ""), reverse=True)
+
+
+def build_facts_summary(record: dict) -> str:
+    """Aggregate the per-document extracted facts into a compact structured snapshot
+    for chat context: current conditions, medications, allergies, and the most recent
+    value of each lab and vital. Returns '' when there are no facts yet (so chat
+    falls back to the retrieved narrative excerpts alone)."""
+    problems: list[str] = []
+    medications: list[str] = []
+    allergies: list[str] = []
+    labs: list[tuple] = []
+    vitals: list[tuple] = []
+
+    for doc in record.get("documents", []):
+        facts = doc.get("facts") or {}
+        doc_date = doc.get("date_detected") or ""
+        problems += [p["name"] for p in facts.get("problems", []) if p.get("name")]
+        medications += [m["name"] for m in facts.get("medications", []) if m.get("name")]
+        allergies += [a["substance"] for a in facts.get("allergies", []) if a.get("substance")]
+        for lab in facts.get("lab_results", []):
+            name = lab.get("canonical_name") or lab.get("test")
+            if name and lab.get("value"):
+                labs.append((name, lab["value"], lab.get("unit") or "", lab.get("date") or doc_date))
+        for vital in facts.get("vitals", []):
+            if vital.get("name") and vital.get("value"):
+                vitals.append((vital["name"], vital["value"], vital.get("unit") or "", vital.get("date") or doc_date))
+
+    problems = _uniq_keep_order(problems)
+    medications = _uniq_keep_order(medications)
+    allergies = _uniq_keep_order(allergies)
+    latest_labs = _latest_by_name(labs)[:25]
+    latest_vitals = _latest_by_name(vitals)
+
+    def _measure_line(name: str, value: str, unit: str, date: str) -> str:
+        unit_part = f" {unit}".rstrip()
+        date_part = f" ({date})" if date else ""
+        return f"- {name}: {value}{unit_part}{date_part}"
+
+    sections: list[str] = []
+    if problems:
+        sections.append("Conditions: " + ", ".join(problems))
+    if medications:
+        sections.append("Medications: " + ", ".join(medications))
+    if allergies:
+        sections.append("Allergies: " + ", ".join(allergies))
+    if latest_labs:
+        sections.append("Most recent labs:\n" + "\n".join(_measure_line(*lab) for lab in latest_labs))
+    if latest_vitals:
+        sections.append("Most recent vitals:\n" + "\n".join(_measure_line(*v) for v in latest_vitals))
+
+    if not sections:
+        return ""
+    return "STRUCTURED RECORD SUMMARY (most recent values; see excerpts for detail)\n" + "\n".join(sections)
+
+
+def _citations_from_chunks(chunks: list[dict]) -> list[dict]:
+    """Build citations from the chunks actually retrieved into context, so a citation
+    always points at a real source rather than something the model invented."""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for chunk in chunks:
+        md = chunk.get("metadata") or {}
+        filename = md.get("filename")
+        if not filename:
+            continue
+        key = (filename, md.get("date"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "filename": filename,
+            "date": md.get("date"),
+            "excerpt": (chunk.get("text") or "")[:240],
+        })
+    return out
+
+
 @app.get("/patients/{patient_id}")
 async def get_patient(patient_id: str):
     entry = await pt.find_patient_by_id(patient_id)
@@ -800,8 +898,6 @@ async def rebuild_state(patient_id: str, session_id: str):
 
 @app.post("/chat")
 async def chat(body: ChatRequest):
-    from documents import read_patient_md  # noqa: PLC0415 — deferred to avoid circular import at module level
-
     _logger.info(
         "chat request received patient_id=%s session_id=%s message_len=%d",
         body.patient_id,
@@ -844,17 +940,14 @@ async def chat(body: ChatRequest):
             ctx_tokens_override if ctx_tokens_override is not None else cfg.context_window_tokens
         )
 
-        # 1. Classify query for optimised chunk retrieval fallback.
-        doc_type = llm.classify_query(user_message)
-
-        # 2. Retrieve relevant chat history (semantic memory).
+        # 1. Retrieve relevant chat history (semantic memory).
         query_embedding = await ai.embed(user_message, task="query")
         history_chunks = await memory.query_chat(
             patient_id, session_id, query_embedding, effective_memory_results
         )
         history_text = "\n\n".join(c["text"] for c in history_chunks)
 
-        # 3. Load conversation state.
+        # 2. Load conversation state.
         conv_state = await pt.load_conversation_state(patient_id, session_id)
         state_capsule = ""
         if conv_state:
@@ -864,34 +957,37 @@ async def chat(body: ChatRequest):
                 f"Open questions: {', '.join(conv_state.get('open_questions', []))}"
             )
 
-        # 4. Patient context — full patient.md or chunk fallback.
-        # Use a conservative ~3 chars/token estimate (not the optimistic 4): dense
-        # clinical text — codes, numbers, dates — tokenizes closer to 3 chars/token,
-        # and patient.md is date-ordered, so an underestimate makes Ollama silently
-        # truncate the TAIL (the most recent labs/meds). Falling back to chunk
-        # retrieval a little earlier is far safer than dropping the newest records.
-        patient_md = await asyncio.to_thread(read_patient_md, Path(entry["folder_path"]))
-        token_estimate = len(patient_md) // 3
-        use_chunks = token_estimate > effective_ctx_tokens
+        # 3. Patient context = structured facts summary + retrieved, provenance-tagged
+        # excerpts. The facts summary gives a clean current snapshot (and degrades to
+        # "" when extraction hasn't produced facts yet); the excerpts carry the
+        # narrative. A larger n_results means a small record retrieves ~all of its
+        # chunks. (patient.md is no longer read into the prompt — it's an export only.)
+        facts_summary = build_facts_summary(record)
+        chunk_results = max(8, min(30, effective_ctx_tokens // 2000))
+        doc_chunks = await memory.query_docs(
+            patient_id, query_embedding, n_results=chunk_results, document_type=None
+        )
+        excerpt_text = "\n\n".join(c["text"] for c in doc_chunks)
 
-        if use_chunks:
-            chunk_results = max(6, min(20, effective_ctx_tokens // 3000))
-            doc_chunks = await memory.query_docs(
-                patient_id, query_embedding, n_results=chunk_results, document_type=doc_type
-            )
-            patient_context = "\n\n".join(c["text"] for c in doc_chunks)
-        else:
-            patient_context = patient_md
+        context_blocks: list[str] = []
+        if facts_summary:
+            context_blocks.append(facts_summary)
+        if excerpt_text:
+            context_blocks.append("RELEVANT EXCERPTS FROM THE RECORD:\n" + excerpt_text)
+        patient_context = "\n\n".join(context_blocks)
+
+        # Citations come from the chunks actually retrieved, not the model.
+        citations = _citations_from_chunks(doc_chunks)
 
         _logger.info(
-            "chat context prepared patient_id=%s session_id=%s use_chunks=%s token_estimate=%d",
+            "chat context prepared patient_id=%s session_id=%s facts=%s chunks=%d",
             patient_id,
             session_id,
-            use_chunks,
-            token_estimate,
+            bool(facts_summary),
+            len(doc_chunks),
         )
 
-        # 5. Assemble prompt.
+        # 4. Assemble prompt.
         # Patient records go in the SYSTEM message so that small instruction-tuned
         # models treat them as pre-loaded background knowledge rather than something
         # the user is asking them to process. Only the conversational elements
@@ -929,11 +1025,11 @@ async def chat(body: ChatRequest):
             messages, model=draft_model, num_ctx=effective_ctx_tokens
         )
 
-        # 7. Grounding verification.
+        # 7. Grounding verification. Citations are already set from the retrieved
+        # chunks above; the verifier only corrects/qualifies the answer text.
         grounding_retried = False
         retry_count = 0
         final_answer = draft
-        citations: list[dict] = []
 
         if cfg.grounding_enabled and cfg.medgemma_verification_enabled:
             should_verify = _should_run_clinical_verification(cfg.routing_mode, high_risk_query)
@@ -951,7 +1047,6 @@ async def chat(body: ChatRequest):
                     context_limit=grounding_context_limit,
                     model=cfg.verification_model,
                 )
-                citations = result.get("citations", [])
                 if attempt > 0:
                     grounding_retried = True
                     retry_count = attempt

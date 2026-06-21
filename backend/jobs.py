@@ -182,9 +182,20 @@ async def _embed_and_upsert_chunks(
     if not chunks:
         return
 
+    # Prepend a provenance header to each chunk so the vector itself encodes the
+    # source and date (not just the Chroma metadata), and so a retrieved chunk
+    # carries its origin into the chat context. The header is stored too — it's the
+    # text the model sees as context.
+    header = (
+        f"[{doc_record['filename']} · "
+        f"{doc_record.get('document_type', 'unknown')} · "
+        f"{doc_record.get('date_detected') or 'unknown'}]"
+    )
+    tagged_chunks = [f"{header}\n{chunk}" for chunk in chunks]
+
     # embed_many returns vectors in input order, so embeddings[i] matches chunks[i].
     # These are stored content, so embed them with the "document" retrieval prefix.
-    embeddings: list[list[float]] = await ai.embed_many(chunks, task="document")
+    embeddings: list[list[float]] = await ai.embed_many(tagged_chunks, task="document")
 
     chunk_ids = [f"{doc_record['id']}_chunk_{i}" for i in range(len(chunks))]
     metadatas = [
@@ -201,7 +212,7 @@ async def _embed_and_upsert_chunks(
 
     await memory.upsert_doc_chunks(
         patient_id=patient_id,
-        chunks=chunks,
+        chunks=tagged_chunks,
         embeddings=embeddings,
         metadatas=metadatas,
         ids=chunk_ids,
@@ -333,9 +344,9 @@ async def _process_file(
 
     doc_type = docs_module.detect_document_type(file_path.name, text)
     # Prefer the extractor's clinically-typed document_date (which is told not to
-    # use the patient's DOB) over the regex date scan, which can latch onto a DOB
-    # or a print date.
-    date_detected = facts.get("document_date") or docs_module.detect_date(text)
+    # use the patient's DOB) over the regex date scan; the scan is now also given
+    # the DOB so its fallback can't latch onto it either.
+    date_detected = facts.get("document_date") or docs_module.detect_date(text, patient_dob)
 
     doc_record = existing_doc.copy() if existing_doc else {
         "id": str(uuid.uuid4()),

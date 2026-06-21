@@ -226,16 +226,27 @@ def _extract_image(file_path: Path, vision_fn: Optional[VisionFn] = None) -> str
     return pytesseract.image_to_string(_to_8bit(img))
 
 
+# Block-level tags whose boundaries become line breaks, so the document's
+# structure (sections, table rows, list items) survives tag stripping and gives
+# the chunker something meaningful to split on.
+_HTML_BLOCK_BOUNDARY_RE = re.compile(
+    r"(?i)<\s*(?:br|/p|/div|/li|/tr|/h[1-6]|/table|/ul|/ol|/section)\b[^>]*>"
+)
+
+
 def _extract_html(file_path: Path) -> str:
     raw = file_path.read_text(encoding="utf-8", errors="replace")
     # Remove non-clinical payloads that frequently dominate CCDA/portal exports.
     raw = re.sub(r"<style\b[^>]*>[\s\S]*?</style>", " ", raw, flags=re.IGNORECASE)
     raw = re.sub(r"<script\b[^>]*>[\s\S]*?</script>", " ", raw, flags=re.IGNORECASE)
     raw = re.sub(r"<!--([\s\S]*?)-->", " ", raw)
+    # Turn block-element boundaries into newlines before stripping the rest.
+    raw = _HTML_BLOCK_BOUNDARY_RE.sub("\n", raw)
     text = re.sub(r"<[^>]+>", " ", raw)
     text = html_module.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    # Collapse runs of spaces/tabs within each line, but keep newlines; drop blanks.
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.split("\n")]
+    return "\n".join(ln for ln in lines if ln)
 
 
 def _extract_json(
@@ -258,16 +269,44 @@ def _extract_json(
 # Chunking
 # ---------------------------------------------------------------------------
 
+def _char_split(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """Overlapping fixed-size character windows — the fallback for a single unit
+    too large to keep whole."""
+    step = max(chunk_size - chunk_overlap, 1)
+    return [text[i : i + chunk_size] for i in range(0, len(text), step)]
+
+
 def chunk_text(text: str, chunk_size: int = 900, chunk_overlap: int = 100) -> list[str]:
-    """Split text into overlapping character-count chunks."""
+    """Structure-aware chunking: pack whole lines/paragraphs into chunks up to
+    chunk_size rather than cutting at arbitrary character offsets, so a lab line,
+    medication, or section heading stays intact. A single unit larger than
+    chunk_size falls back to character windows; chunk_overlap carries a tail of the
+    previous chunk into the next so context spanning a boundary isn't lost."""
     if not text.strip():
         return []
+
+    units = [u for u in (line.strip() for line in text.split("\n")) if u]
     chunks: list[str] = []
-    start = 0
-    step = max(chunk_size - chunk_overlap, 1)
-    while start < len(text):
-        chunks.append(text[start : start + chunk_size])
-        start += step
+    current = ""
+
+    for unit in units:
+        if len(unit) > chunk_size:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(_char_split(unit, chunk_size, chunk_overlap))
+            continue
+
+        candidate = f"{current}\n{unit}" if current else unit
+        if len(candidate) > chunk_size and current:
+            chunks.append(current)
+            tail = current[-chunk_overlap:] if chunk_overlap > 0 else ""
+            current = f"{tail}\n{unit}" if tail else unit
+        else:
+            current = candidate
+
+    if current.strip():
+        chunks.append(current)
     return chunks
 
 
@@ -311,12 +350,18 @@ def _normalize_date(raw: str) -> str:
     return raw
 
 
-def detect_date(text: str) -> Optional[str]:
-    """Return the first recognisable date in the first 2000 chars, normalised to ISO."""
+def detect_date(text: str, patient_dob: Optional[str] = None) -> Optional[str]:
+    """Return the first recognisable date in the first 2000 chars, normalised to
+    ISO. Skips any date matching the patient's DOB — reports routinely print the
+    DOB above the service date, so the naive "first date" would misattribute it."""
+    dob = _normalize_date(patient_dob) if patient_dob else None
+    window = text[:2000]
     for pattern in _DATE_PATTERNS:
-        m = re.search(pattern, text[:2000], re.IGNORECASE)
-        if m:
-            return _normalize_date(m.group(0))
+        for m in re.finditer(pattern, window, re.IGNORECASE):
+            normalized = _normalize_date(m.group(0))
+            if dob and normalized == dob:
+                continue
+            return normalized
     return None
 
 
