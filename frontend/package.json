@@ -9,9 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "dompurify": "^3.2.7",
+    "dompurify": "^3.4.11",
     "marked": "^15.0.12",
-    "next": "15.5.15",
+    "next": "15.5.18",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
@@ -22,5 +22,8 @@
     "@types/react-dom": "^19.1.2",
     "tailwindcss": "^4.1.5",
     "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }

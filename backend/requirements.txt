@@ -4,7 +4,7 @@ pydantic==2.10.3
 httpx==0.28.1
 pymupdf==1.25.1
 pytesseract==0.3.13
-Pillow==11.1.0
+Pillow==12.2.0
 chromadb==0.6.3
 watchdog==6.0.0
-python-multipart==0.0.20
+python-multipart==0.0.31
