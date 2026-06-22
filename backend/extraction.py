@@ -14,9 +14,11 @@ canonical_name on lab results is LLM-emitted here; Phase G layers a curated
 table on top (table first, this as fallback).
 """
 
+import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -327,10 +329,16 @@ async def _extract_category(scope: str, cat: _Category, patient_dob: Optional[st
         dob_hint=_dob_hint(patient_dob),
         document_text=scope[:_MAX_EXTRACTION_CHARS],
     )
+    start = time.monotonic()
     result = await _run_structured(prompt, cat.model, _CATEGORY_NUM_PREDICT)
-    if not result:
-        return []
-    return _dedup(result.get(cat.key) or [])
+    items = _dedup(result.get(cat.key) or []) if result else []
+    # Per-category timing. The UI shows extraction as one combined phase (and the
+    # calls may overlap when extraction_concurrency > 1), so this log is how we see
+    # which category dominates the cost.
+    _logger.info(
+        "extraction[%s]: %d item(s) in %.1fs", cat.key, len(items), time.monotonic() - start
+    )
+    return items
 
 
 async def _extract_date(text: str, patient_dob: Optional[str]) -> dict:
@@ -352,11 +360,6 @@ async def extract_facts(text: str, patient_dob: Optional[str] = None) -> dict:
     text = text[:_MAX_EXTRACTION_CHARS]
     facts = empty_facts()
 
-    date = await _extract_date(text, patient_dob)
-    if date.get("document_date"):
-        facts["document_date"] = date["document_date"]
-        facts["document_date_type"] = date.get("document_date_type")
-
     # Section-scope only large documents. On a short note a data-bearing line like
     # "Vitals: Wt 315lb" would be misread as a header (excluding its data from the
     # body), so small docs are simply scanned whole-text per category — cheap, and
@@ -364,14 +367,52 @@ async def extract_facts(text: str, patient_dob: Optional[str] = None) -> dict:
     # back to whole-text per category (correctness over cost; unavoidable).
     sections = {} if len(text) <= _SMALL_DOC_CHARS else _detect_sections(text)
 
+    # Decide which categories to run. A sectioned document with no section for a
+    # category simply has none of it, so skip its call entirely.
+    pending: list[_Category] = []
     for cat in _CATEGORIES:
         if sections:
-            scope = sections.get(cat.key)
-            if scope is None:
-                # A sectioned document with no section for this category has none of it.
+            if sections.get(cat.key) is None:
                 continue
-        else:
-            scope = text
-        facts[cat.key] = await _extract_category(scope, cat, patient_dob)
+        pending.append(cat)
+
+    def _scope_for(cat: _Category) -> str:
+        return sections[cat.key] if sections else text
+
+    # Surface which path this document took, so we can tell whether the call count
+    # is already minimal (one per detected section) or hitting the redundant
+    # whole-text scan (every category re-reading the same text).
+    _logger.info(
+        "extraction plan: %d category call(s) [%s] — %s",
+        len(pending),
+        ", ".join(c.key for c in pending),
+        "sectioned" if sections else f"whole-text scan, {len(text)} chars",
+    )
+
+    # The date call and every category call are independent (different category,
+    # different section scope), so they *can* overlap. Whether overlapping helps is
+    # entirely a function of the host's Ollama: it speeds things up on a GPU with
+    # parallel slots, but on a CPU-only Ollama it just thrashes the shared cores and
+    # can push a queued call past chat_timeout_seconds. So concurrency is config-gated
+    # and defaults to 1 (sequential) — safe on every install — bounded by a semaphore
+    # so a call's timeout clock starts only when it actually begins (no queue pile-up).
+    concurrency = max(1, load_config().extraction_concurrency)
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _bounded(coro):
+        async with sem:
+            return await coro
+
+    results = await asyncio.gather(
+        _bounded(_extract_date(text, patient_dob)),
+        *(_bounded(_extract_category(_scope_for(cat), cat, patient_dob)) for cat in pending),
+    )
+
+    date = results[0]
+    if date.get("document_date"):
+        facts["document_date"] = date["document_date"]
+        facts["document_date_type"] = date.get("document_date_type")
+    for cat, items in zip(pending, results[1:]):
+        facts[cat.key] = items
 
     return facts

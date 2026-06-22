@@ -24,7 +24,7 @@ import memory
 import patients as pt
 import prompts
 import watcher
-from config import LOG_PAYLOADS, load_config, patch_config, save_config, Config
+from config import load_config, patch_config, save_config, Config
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +97,133 @@ def _should_run_clinical_verification(
     if mode == "fast":
         return False
     return high_risk_query
+
+
+# ---------------------------------------------------------------------------
+# Chat conversation memory
+# ---------------------------------------------------------------------------
+
+# Strong refs to fire-and-forget background tasks (post-chat bookkeeping), so the
+# event loop can't garbage-collect them mid-run. Mirrors jobs._spawn.
+_background_tasks: set = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+# Most-recent exchange pairs kept verbatim in the prompt. Older exchanges are folded
+# into the rolling summary one at a time as they leave this window. Keeping recent
+# turns verbatim preserves pronoun / "that" references that semantic retrieval alone
+# can miss, and lets the common short conversation run with NO summary LLM call.
+RECENT_TURN_PAIRS = 4
+# Cap each verbatim message so one long answer can't dominate the context window.
+_RECENT_TURN_CHAR_CAP = 1500
+
+
+def _format_recent_turns(messages: list[dict], max_pairs: int) -> str:
+    """Render the last ``max_pairs`` user/assistant exchanges verbatim."""
+    if max_pairs <= 0:
+        return ""
+    lines: list[str] = []
+    for m in messages[-max_pairs * 2:]:
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > _RECENT_TURN_CHAR_CAP:
+            content = content[:_RECENT_TURN_CHAR_CAP] + " […]"
+        speaker = "User" if m.get("role") == "user" else "Assistant"
+        lines.append(f"{speaker}: {content}")
+    return "\n\n".join(lines)
+
+
+def _overflow_exchange(messages: list[dict], window_pairs: int) -> Optional[tuple[str, str]]:
+    """The (user, assistant) exchange that just left the verbatim window this turn,
+    or None while the whole conversation still fits in the window. Returns each
+    exchange exactly once — the turn after it drops out of the recent window — so
+    folding it into the rolling summary captures all older history without ever
+    re-summarizing (and re-distorting) the recent turns."""
+    num_pairs = len(messages) // 2
+    idx = num_pairs - 1 - window_pairs
+    if idx < 0:
+        return None
+    user_msg = messages[2 * idx]
+    asst_msg = messages[2 * idx + 1]
+    if user_msg.get("role") != "user" or asst_msg.get("role") != "assistant":
+        return None
+    return (user_msg.get("content") or "", asst_msg.get("content") or "")
+
+
+async def _post_chat_followup(
+    cfg: Config,
+    patient_id: str,
+    session_id: str,
+    user_message: str,
+    final_answer: str,
+    now: str,
+    record: dict,
+) -> None:
+    """Model-bound bookkeeping that doesn't need to block the user's answer: store
+    the exchange in semantic memory, fold the exchange leaving the verbatim window
+    into the rolling summary, and update session metadata / auto-title. Runs as a
+    background task; each persistence step takes the per-patient record lock, so it
+    serialises safely with the next turn."""
+    try:
+        # Store the exchange in ChromaDB chat memory for later semantic retrieval.
+        exchange_text = f"User: {user_message}\nAssistant: {final_answer}"
+        exchange_embedding = await ai.embed(exchange_text, task="document")
+        await memory.upsert_chat_exchange(
+            patient_id=patient_id,
+            session_id=session_id,
+            exchange_id=str(uuid.uuid4()),
+            text=exchange_text,
+            embedding=exchange_embedding,
+            metadata={
+                "patient_id": patient_id,
+                "chat_session_id": session_id,
+                "role": "exchange",
+                "timestamp": now,
+            },
+        )
+
+        log = await pt.load_message_log(patient_id, session_id)
+        messages = log.get("messages", []) if log else []
+
+        # Rolling summary: only fold the exchange that just left the verbatim window
+        # (none while the conversation still fits). Reload state fresh here rather
+        # than holding it across the answer, so a prior turn's fold isn't lost.
+        overflow = _overflow_exchange(messages, RECENT_TURN_PAIRS)
+        if overflow is not None:
+            conv_state = await pt.load_conversation_state(patient_id, session_id)
+            state_updates = await llm.update_conversation_state(conv_state, overflow[0], overflow[1])
+            new_state = dict(conv_state) if conv_state else {"created_at": now}
+            new_state.update(state_updates)
+            await pt.save_conversation_state(patient_id, session_id, new_state)
+
+        # Session metadata + auto-title on the first completed exchange.
+        session_updates: dict[str, Any] = {
+            "last_message_at": now,
+            "message_count": len(messages),
+        }
+        session_record = next(
+            (s for s in record.get("chat_sessions", []) if s["id"] == session_id), None
+        )
+        if session_record and session_record.get("title_auto_generated") and session_record.get("title") == "New Chat":
+            try:
+                auto_title = await llm.generate_session_title(user_message, final_answer, model=cfg.chat_model)
+                if auto_title:
+                    session_updates["title"] = auto_title
+                    session_updates["title_auto_generated"] = False
+            except Exception:
+                _logger.exception("auto-title failed session_id=%s — skipping", session_id)
+
+        await pt.update_chat_session(patient_id, session_id, session_updates)
+    except Exception:
+        _logger.exception(
+            "post-chat followup failed patient_id=%s session_id=%s", patient_id, session_id
+        )
 
 
 @app.exception_handler(Exception)
@@ -940,22 +1067,33 @@ async def chat(body: ChatRequest):
             ctx_tokens_override if ctx_tokens_override is not None else cfg.context_window_tokens
         )
 
-        # 1. Retrieve relevant chat history (semantic memory).
+        # 1. Retrieve relevant chat history (semantic memory) + recent turns verbatim.
         query_embedding = await ai.embed(user_message, task="query")
         history_chunks = await memory.query_chat(
             patient_id, session_id, query_embedding, effective_memory_results
         )
         history_text = "\n\n".join(c["text"] for c in history_chunks)
 
-        # 2. Load conversation state.
+        # Recent turns verbatim: load the log BEFORE this turn's exchange is appended,
+        # so it holds only prior turns. Verbatim recent history keeps pronoun / "that"
+        # references intact that the semantic retrieval above can miss.
+        prior_log = await pt.load_message_log(patient_id, session_id)
+        prior_messages = prior_log.get("messages", []) if prior_log else []
+        recent_turns_text = _format_recent_turns(prior_messages, RECENT_TURN_PAIRS)
+
+        # 2. Load conversation state — the rolling summary of turns OLDER than the
+        # verbatim window. Include only non-empty parts so a short conversation (whose
+        # full history is already in the verbatim window) adds no empty-summary noise.
         conv_state = await pt.load_conversation_state(patient_id, session_id)
-        state_capsule = ""
+        state_bits: list[str] = []
         if conv_state:
-            state_capsule = (
-                f"Rolling summary: {conv_state.get('rolling_summary', '')}\n"
-                f"Active topics: {', '.join(conv_state.get('active_topics', []))}\n"
-                f"Open questions: {', '.join(conv_state.get('open_questions', []))}"
-            )
+            if conv_state.get("rolling_summary"):
+                state_bits.append(f"Summary of earlier conversation: {conv_state['rolling_summary']}")
+            if conv_state.get("active_topics"):
+                state_bits.append(f"Active topics: {', '.join(conv_state['active_topics'])}")
+            if conv_state.get("open_questions"):
+                state_bits.append(f"Open questions: {', '.join(conv_state['open_questions'])}")
+        state_capsule = "\n".join(state_bits)
 
         # 3. Patient context = structured facts summary + retrieved, provenance-tagged
         # excerpts. The facts summary gives a clean current snapshot (and degrades to
@@ -1008,8 +1146,10 @@ async def chat(body: ChatRequest):
             user_content_parts.append(profile_text)
         if state_capsule:
             user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
+        if recent_turns_text:
+            user_content_parts.append(f"RECENT CONVERSATION:\n{recent_turns_text}")
         if history_text:
-            user_content_parts.append(f"RELEVANT PRIOR EXCHANGES:\n{history_text}")
+            user_content_parts.append(f"OTHER RELEVANT EXCHANGES:\n{history_text}")
         user_content_parts.append(user_message)
 
         messages = [
@@ -1063,7 +1203,9 @@ async def chat(body: ChatRequest):
             if grounding_uncertainty:
                 final_answer = f"{final_answer}\n\n_{grounding_uncertainty.strip()}_"
 
-        # 8. Persist exchange.
+        # 8. Persist the exchange to the message log NOW — it's the source of truth
+        #    the UI reloads from, so it stays on the response path (local file writes
+        #    are fast; a reload right after sending must never lose the turn).
         now = _now()
         user_msg_record = {
             "id": str(uuid.uuid4()),
@@ -1083,71 +1225,14 @@ async def chat(body: ChatRequest):
         await pt.append_message(patient_id, session_id, user_msg_record)
         await pt.append_message(patient_id, session_id, asst_msg_record)
 
-        # Embed and store the exchange in ChromaDB chat memory.
-        exchange_text = f"User: {user_message}\nAssistant: {final_answer}"
-        exchange_embedding = await ai.embed(exchange_text, task="document")
-        await memory.upsert_chat_exchange(
-            patient_id=patient_id,
-            session_id=session_id,
-            exchange_id=str(uuid.uuid4()),
-            text=exchange_text,
-            embedding=exchange_embedding,
-            metadata={
-                "patient_id": patient_id,
-                "chat_session_id": session_id,
-                "role": "exchange",
-                "timestamp": now,
-            },
+        # 9. Hand the model-bound bookkeeping (chat-memory embedding, rolling-summary
+        #    fold, session metadata, auto-title) to a background task so the user gets
+        #    the answer without waiting on extra Ollama round-trips afterwards.
+        _spawn_background(
+            _post_chat_followup(
+                cfg, patient_id, session_id, user_message, final_answer, now, record
+            )
         )
-
-        # 9. Update conversation state (fire-and-forget style but awaited since
-        #    we're still in the request — acceptable latency for a local app).
-        state_updates = await llm.update_conversation_state(conv_state, user_message, final_answer)
-        if conv_state is None:
-            conv_state = {
-                "created_at": now,
-            }
-        conv_state.update(state_updates)
-        await pt.save_conversation_state(patient_id, session_id, conv_state)
-
-        # 10. Update session metadata.
-        log = await pt.load_message_log(patient_id, session_id)
-        msg_count = len(log["messages"]) if log else 0
-        session_updates: dict[str, Any] = {
-            "last_message_at": now,
-            "message_count": msg_count,
-        }
-
-        # Auto-title on first completed exchange.
-        session_record = next(
-            (s for s in record.get("chat_sessions", []) if s["id"] == session_id), None
-        )
-        _logger.info(
-            "auto-title check session_id=%s session_found=%s title_auto_generated=%s msg_count=%d",
-            session_id,
-            session_record is not None,
-            session_record.get("title_auto_generated") if session_record else None,
-            msg_count,
-        )
-        if session_record and session_record.get("title_auto_generated") and session_record.get("title") == "New Chat":
-            try:
-                auto_title = await llm.generate_session_title(
-                    user_message,
-                    final_answer,
-                    model=cfg.chat_model,
-                )
-                _logger.info(
-                    "auto-title generated session_id=%s title=%s",
-                    session_id,
-                    repr(auto_title) if LOG_PAYLOADS else f"<redacted {len(auto_title or '')} chars>",
-                )
-                if auto_title:
-                    session_updates["title"] = auto_title
-                    session_updates["title_auto_generated"] = False
-            except Exception:
-                _logger.exception("auto-title failed session_id=%s — skipping", session_id)
-
-        await pt.update_chat_session(patient_id, session_id, session_updates)
 
         _logger.info(
             "chat request completed patient_id=%s session_id=%s message_len=%d response_len=%d",

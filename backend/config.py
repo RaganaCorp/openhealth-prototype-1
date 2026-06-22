@@ -53,6 +53,13 @@ class Config(BaseModel):
     meta_timeout_seconds: float
     chunk_size: int
     chunk_overlap: int
+    # How many per-category clinical-extraction calls to run concurrently per
+    # document. Default 1 (sequential) is the safe choice for every install: on a
+    # CPU-only Ollama, overlapping calls only thrash the same cores and can push a
+    # queued call past chat_timeout_seconds (a spurious failure). Installs whose
+    # Ollama runs on a GPU with parallel slots (OLLAMA_NUM_PARALLEL > 1) can raise
+    # this (e.g. to 4) to overlap the calls and shorten extraction wall-clock.
+    extraction_concurrency: int = 1
     memory_results: int
     context_window_tokens: int
     data_path: str = str(DATA_PATH)

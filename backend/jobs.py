@@ -137,7 +137,17 @@ def _set_phase(job: dict, phase: str, current_file: Optional[str] = None) -> Non
                 elapsed_ms = int((datetime.now(timezone.utc) - start_dt).total_seconds() * 1000)
             except ValueError:
                 elapsed_ms = 0
-            job["phase_history"].append({"phase": prev_phase, "elapsed_ms": elapsed_ms})
+            # The per-file sub-phases (extracting_text/extracting_facts/embedding)
+            # repeat once per document. Accumulate into the existing entry for this
+            # phase rather than appending a row per file, so the breakdown reads as a
+            # clean pipeline (one line per stage) while still totaling its real cost.
+            # First-seen order is preserved, which matches the pipeline order.
+            history = job["phase_history"]
+            existing = next((e for e in history if e["phase"] == prev_phase), None)
+            if existing is not None:
+                existing["elapsed_ms"] += elapsed_ms
+            else:
+                history.append({"phase": prev_phase, "elapsed_ms": elapsed_ms})
         job["phase"] = phase
         job["phase_started_at"] = _now()
     if current_file is not None:
@@ -302,11 +312,15 @@ async def _process_file(
     file_path: Path,
     existing_doc: Optional[dict],
     is_rebuild: bool,
+    job: dict,
     patient_dob: Optional[str] = None,
 ) -> dict:
     """
     Extract text + structured facts, embed, and return an updated document record.
     Overwrites the .extracted / .facts.json sidecars if the file changed or is being rebuilt.
+
+    Drives the job's sub-phase as it goes (reading → extracting facts → embedding)
+    so the progress UI shows where time is actually spent, not one opaque block.
     """
     extracted_path = file_path.with_suffix(file_path.suffix + ".extracted")
     facts_path = file_path.with_suffix(file_path.suffix + ".facts.json")
@@ -321,6 +335,7 @@ async def _process_file(
 
     # Determine if we need to re-extract; the same decision gates fact regeneration.
     needs_reextract = is_rebuild or bool(existing_doc and _file_changed(file_path, existing_doc))
+    _set_phase(job, "extracting_text", file_path.name)
     if needs_reextract:
         text = await asyncio.to_thread(
             docs_module.overwrite_extracted_sidecar,
@@ -338,6 +353,7 @@ async def _process_file(
             vision_fn,
         )
 
+    _set_phase(job, "extracting_facts", file_path.name)
     facts = await _load_or_extract_facts(
         text, facts_path, regenerate=needs_reextract, patient_dob=patient_dob
     )
@@ -367,6 +383,7 @@ async def _process_file(
         "facts": facts,
     })
 
+    _set_phase(job, "embedding", file_path.name)
     await _embed_and_upsert_chunks(patient_id, doc_record, text)
     return doc_record
 
@@ -507,7 +524,7 @@ async def _persist_documents(
     even when some files failed, so successful work is never discarded."""
     good_docs = [d for d in all_docs if d.get("status") != "error"]
 
-    _set_phase(job, "rebuilding_patient_md", "patient.md")
+    _set_phase(job, "writing_export", "patient.md")
     async with pt.record_lock(patient_id):
         await asyncio.to_thread(_rebuild_patient_md, patient_folder, good_docs)
 
@@ -573,7 +590,6 @@ async def _run_incremental(
                 files_to_process.append((fp, ed))
 
         job["total"] = len(files_to_process)
-        _set_phase(job, "processing_files")
 
         updated_docs: dict[str, dict] = {**existing_docs}
         failed_files: list[str] = []
@@ -585,7 +601,8 @@ async def _run_incremental(
             # failure as an errored document so it stays visible and retries later.
             try:
                 doc_record = await _process_file(
-                    patient_id, file_path, existing_doc, is_rebuild=False, patient_dob=patient_dob
+                    patient_id, file_path, existing_doc, is_rebuild=False,
+                    job=job, patient_dob=patient_dob
                 )
             except Exception as exc:
                 _logger.exception(
@@ -641,7 +658,6 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
 
         all_files = await asyncio.to_thread(docs_module.scan_uploads, uploads_dir)
         job["total"] = len(all_files)
-        _set_phase(job, "processing_files")
 
         new_docs: list[dict] = []
         failed_files: list[str] = []
@@ -649,7 +665,8 @@ async def _run_rebuild(patient_id: str, job: dict) -> None:
             job["current_file"] = file_path.name
             try:
                 doc_record = await _process_file(
-                    patient_id, file_path, None, is_rebuild=True, patient_dob=patient_dob
+                    patient_id, file_path, None, is_rebuild=True,
+                    job=job, patient_dob=patient_dob
                 )
             except Exception as exc:
                 _logger.exception(
@@ -717,7 +734,7 @@ async def _run_document_deletion(patient_id: str, job: dict, document_id: str) -
         # 3. Rebuild patient.md from the remaining documents (sidecar reads only —
         #    no re-extraction or re-embedding).
         remaining = [d for d in record.get("documents", []) if d.get("id") != document_id]
-        _set_phase(job, "rebuilding_patient_md", "patient.md")
+        _set_phase(job, "writing_export", "patient.md")
         async with pt.record_lock(patient_id):
             await asyncio.to_thread(_rebuild_patient_md, patient_folder, remaining)
 

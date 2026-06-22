@@ -134,14 +134,29 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
   const phaseLabels: Record<string, string> = {
     queued: "Queued",
     loading: "Loading patient record",
-    processing_files: "Extracting and embedding files",
+    extracting_text: "Reading documents",
+    extracting_facts: "Extracting clinical facts",
+    embedding: "Embedding for search",
     deleting_files: "Removing files",
     removing_chunks: "Removing vectors",
-    rebuilding_patient_md: "Rebuilding patient document",
+    writing_export: "Updating record export",
     saving: "Saving updates",
     complete: "Ready",
     failed: "Needs Review",
   };
+
+  // Canonical pipeline order for the per-phase breakdown. The per-file sub-phases
+  // (reading/facts/embedding) repeat once per document but the backend accumulates
+  // them into one entry each, so we render a clean one-line-per-stage timeline.
+  const phaseOrder = [
+    "queued",
+    "loading",
+    "extracting_text",
+    "extracting_facts",
+    "embedding",
+    "writing_export",
+    "saving",
+  ];
 
   const phaseText = phaseLabels[job.phase ?? ""];
   const runningText = phaseText
@@ -158,8 +173,10 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
 
   const phaseWarningThresholdMs: Record<string, number> = {
     loading: 10_000,
-    processing_files: 120_000,
-    rebuilding_patient_md: 15_000,
+    extracting_text: 120_000,
+    extracting_facts: 120_000,
+    embedding: 60_000,
+    writing_export: 15_000,
     saving: 10_000,
   };
 
@@ -172,6 +189,29 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
     const remSeconds = seconds % 60;
     return minutes > 0 ? `${minutes}m ${remSeconds}s` : `${remSeconds}s`;
   }
+
+  // Per-phase timeline: start from the accumulated completed-phase totals, then fold
+  // the live segment of the currently-running phase into its own row so a stage that
+  // recurs across files shows a single growing total — not a duplicate "(running)" row.
+  const accumulatedMs = new Map<string, number>();
+  for (const entry of job.phase_history ?? []) {
+    accumulatedMs.set(entry.phase, (accumulatedMs.get(entry.phase) ?? 0) + entry.elapsed_ms);
+  }
+  const activePhase = job.status === "running" ? job.phase ?? undefined : undefined;
+  if (activePhase) {
+    accumulatedMs.set(activePhase, (accumulatedMs.get(activePhase) ?? 0) + phaseElapsedMs);
+  }
+  // Render known stages in pipeline order, then any unexpected phases that still
+  // showed up (so nothing silently disappears from the accounting).
+  const orderedPhases = [
+    ...phaseOrder.filter((p) => accumulatedMs.has(p)),
+    ...[...accumulatedMs.keys()].filter((p) => !phaseOrder.includes(p)),
+  ];
+  const breakdown = orderedPhases.map((phase) => ({
+    phase,
+    elapsedMs: accumulatedMs.get(phase) ?? 0,
+    active: phase === activePhase,
+  }));
 
   return (
     <div className="rounded-[22px] border border-border/80 bg-surface-elevated p-4">
@@ -210,20 +250,19 @@ export function IngestionProgress({ jobId, onResolved, onDismiss, onTerminalErro
         {job.error ? <span className="text-error">{job.error}</span> : null}
       </div>
 
-      {Object.keys(job.phase_history ?? {}).length > 0 || (job.status === "running" && job.phase) ? (
+      {breakdown.length > 0 ? (
         <div className="mt-3 space-y-1 border-t border-border/40 pt-3">
-          {(job.phase_history ?? []).map((entry, i) => (
-            <div key={i} className="flex justify-between text-xs text-text-secondary">
-              <span>{phaseLabels[entry.phase] ?? entry.phase}</span>
-              <span>{formatDuration(entry.elapsed_ms)}</span>
+          {breakdown.map((row) => (
+            <div key={row.phase} className="flex justify-between text-xs text-text-secondary">
+              <span className={row.active ? "text-text-primary" : undefined}>
+                {phaseLabels[row.phase] ?? row.phase}
+              </span>
+              <span className={row.active ? "text-text-primary" : undefined}>
+                {formatDuration(row.elapsedMs)}
+                {row.active ? " (running)" : ""}
+              </span>
             </div>
           ))}
-          {job.status === "running" && job.phase ? (
-            <div className="flex justify-between text-xs text-text-secondary">
-              <span>{phaseLabels[job.phase] ?? job.phase}</span>
-              <span>{formatDuration(phaseElapsedMs)} (running)</span>
-            </div>
-          ) : null}
         </div>
       ) : null}
 
