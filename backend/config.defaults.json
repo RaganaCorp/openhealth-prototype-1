@@ -1,5 +1,5 @@
 {
-  "chat_model": "gemma4:e2b",
+  "chat_model": "gemma4:e2b-it-q4_K_M",
   "clinical_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
   "verification_model": "dcarrascosa/medgemma-1.5-4b-it:Q4_K_M",
   "vision_model": "dcarrascosa/medgemma-1.5-4b-it:Q8_0",
@@ -9,6 +9,7 @@
   "meta_timeout_seconds": 15.0,
   "chunk_size": 750,
   "chunk_overlap": 80,
+  "extraction_concurrency": 1,
   "memory_results": 8,
   "context_window_tokens": 32000,
   "data_path": "/data",
