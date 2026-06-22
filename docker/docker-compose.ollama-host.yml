@@ -1,14 +1,15 @@
-# OpenHealth — Windows, Ollama running in Docker container
-# Copied to project root as docker-compose.yml by install.ps1
+# OpenHealth — Ollama running natively on the host (Windows, macOS, or Linux)
+# Copied to the project root as docker-compose.yml by install.ps1 / install.sh.
+#
+# Ollama is expected on the host at localhost:11434 so it can use the GPU. A
+# container on Windows/macOS gets no GPU access (CPU-only), which is far too slow
+# for these models — hence host Ollama is the only supported configuration.
 
 name: openhealth
 
 networks:
   openhealth_net:
     driver: bridge
-
-volumes:
-  ollama_data:
 
 services:
   frontend:
@@ -31,22 +32,13 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       - DATA_PATH=/data
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
     volumes:
       - ./data:/data
     networks:
       - openhealth_net
-    depends_on:
-      - ollama
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    ports:
-      - "127.0.0.1:11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - openhealth_net
+    # Maps host.docker.internal to the host gateway on Linux; harmless on Docker
+    # Desktop (Windows/macOS), where the name is already predefined.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped

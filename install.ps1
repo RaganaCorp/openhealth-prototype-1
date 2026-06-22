@@ -1,5 +1,10 @@
-﻿# OpenHealth Installer - Windows (PowerShell)
+# OpenHealth Installer - Windows (PowerShell)
 # Run from the project root: .\install.ps1
+#
+# Docker Desktop must be installed manually first (it usually needs a restart).
+# Safe to run more than once: it installs Ollama if missing, starts Docker/Ollama
+# if they're stopped, and re-pulls the models (Ollama fetches only changed layers),
+# so a re-run doubles as an "update" pass.
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
@@ -10,17 +15,25 @@ Write-Host "  OpenHealth Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# -- 1. Check / install Docker ------------------------------------------------
+# -- Helpers ------------------------------------------------------------------
 
 function Test-Command($name) {
     return $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
 }
 
-# Wait up to 30 seconds for Ollama to respond on localhost:11434
+# Pull Machine + User PATH into the current session so a freshly-installed CLI
+# (winget puts it on PATH for *new* shells) is usable without reopening the terminal.
+function Update-SessionPath {
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
+}
+
+# Wait up to $TimeoutSec for Ollama to respond on localhost:11434.
 function Wait-ForOllama {
+    param([int]$TimeoutSec = 30)
     $waited = 0
     Write-Host "Waiting for Ollama to be ready" -NoNewline
-    while ($waited -lt 30) {
+    while ($waited -lt $TimeoutSec) {
         try {
             $null = Invoke-WebRequest -Uri "http://localhost:11434" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
             Write-Host ""
@@ -35,8 +48,8 @@ function Wait-ForOllama {
     return $false
 }
 
-# Ensure the Ollama server is running before pulling models (a fresh install
-# does not start it automatically).
+# Ensure the Ollama server is running before pulling models (a fresh install,
+# or a host where the tray app isn't running yet, won't have it up).
 function Start-OllamaServer {
     try {
         $null = Invoke-WebRequest -Uri "http://localhost:11434" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
@@ -48,41 +61,80 @@ function Start-OllamaServer {
     }
 }
 
+# Launch Docker Desktop from its usual install locations. Returns $true if found.
+function Start-DockerDesktop {
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"),
+        (Join-Path $env:LOCALAPPDATA "Docker\Docker Desktop.exe")
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) {
+            Start-Process -FilePath $p | Out-Null
+            return $true
+        }
+    }
+    return $false
+}
+
+# Wait for the Docker daemon to accept commands (Docker Desktop is slow to start).
+function Wait-ForDocker {
+    param([int]$TimeoutSec = 180)
+    $waited = 0
+    Write-Host "Waiting for Docker to be ready" -NoNewline
+    while ($waited -lt $TimeoutSec) {
+        docker info *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Host ""; return $true }
+        Write-Host "." -NoNewline
+        Start-Sleep -Seconds 3
+        $waited += 3
+    }
+    Write-Host ""
+    return $false
+}
+
 # Models that fail to pull are collected and reported at the end.
 $pullFailures = @()
 
+# -- 1. Check / install Docker ------------------------------------------------
+
 if (-not (Test-Command "docker")) {
     Write-Host "Docker Desktop is not installed." -ForegroundColor Yellow
-    Write-Host "Docker Desktop is required to run OpenHealth."
+    Write-Host "Docker Desktop is required to run OpenHealth and must be installed manually."
     Write-Host ""
-    Write-Host "Please install Docker Desktop manually:"
-    Write-Host "  https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
+    Write-Host "  1. Download and install Docker Desktop:"
+    Write-Host "       https://www.docker.com/products/docker-desktop/" -ForegroundColor Cyan
+    Write-Host "  2. Restart your computer if prompted (installation usually requires it)."
+    Write-Host "  3. Launch Docker Desktop and wait for it to finish starting."
+    Write-Host "  4. Re-run install.ps1."
     Write-Host ""
-    $null = Read-Host "Press Enter after installing Docker Desktop (or Ctrl+C to cancel)"
-
-    if (-not (Test-Command "docker")) {
-        Write-Host ""
-        Write-Host "Docker CLI is still not available in this terminal." -ForegroundColor Yellow
-        Write-Host "Open a new terminal and re-run install.ps1 after Docker Desktop finishes installing."
-        exit 1
-    }
+    exit 1
 }
 
-# -- 2. Check Docker daemon is running ----------------------------------------
+# -- 2. Ensure the Docker daemon is running -----------------------------------
 
 Write-Host "Checking Docker daemon..." -ForegroundColor Cyan
-$null = docker info 2>&1
+docker info *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host ""
-    Write-Host "Docker is installed but not running." -ForegroundColor Yellow
-    Write-Host "Please launch Docker Desktop from the Start menu and wait for it to fully start."
-    Write-Host "(If you just installed Docker Desktop, you may need to log out and back in first.)"
-    exit 1
+    Write-Host "Docker is installed but not running. Attempting to start Docker Desktop..." -ForegroundColor Yellow
+    if (Start-DockerDesktop) {
+        if (-not (Wait-ForDocker)) {
+            Write-Host ""
+            Write-Host "Docker did not become ready in time." -ForegroundColor Red
+            Write-Host "Launch Docker Desktop, wait for it to fully start, then re-run install.ps1."
+            Write-Host "(If you just installed Docker Desktop, you may need to log out and back in first.)"
+            exit 1
+        }
+    } else {
+        Write-Host ""
+        Write-Host "Could not locate Docker Desktop to start it automatically." -ForegroundColor Red
+        Write-Host "Launch Docker Desktop from the Start menu, wait for it to start, then re-run install.ps1."
+        exit 1
+    }
 }
 Write-Host "Docker is running." -ForegroundColor Green
 Write-Host ""
 
-# -- Helper: load required models from config.defaults.json -------------------
+# -- 3. Load required models from config.defaults.json ------------------------
 
 $configPath = Join-Path $ScriptDir "backend\config.defaults.json"
 if (-not (Test-Path $configPath)) {
@@ -90,132 +142,82 @@ if (-not (Test-Path $configPath)) {
     exit 1
 }
 $cfg = Get-Content $configPath -Raw | ConvertFrom-Json
+# Include EVERY model the backend requires at startup — vision_model included, or
+# the backend preflight (ensure_ollama_available) fails on a "successful" install.
 $models = @(
     $cfg.chat_model
     $cfg.clinical_model
     $cfg.verification_model
+    $cfg.vision_model
     $cfg.embedding_model
 ) | Where-Object { $_ } | Sort-Object -Unique
 
-# -- 3. Check / install Ollama ------------------------------------------------
+# -- 4. Check / install Ollama ------------------------------------------------
+# Ollama runs natively on the host (not in a container) so it can use the GPU. A
+# container on Windows is CPU-only here, which is far too slow for these models.
 
-if (Test-Command "ollama") {
-    Write-Host "Ollama is already installed." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Copying compose configuration (host Ollama)..."
-    Copy-Item "docker\docker-compose.windows-ollama-host.yml" "docker-compose.yml" -Force
-
-    if (-not (Start-OllamaServer)) {
-        Write-Host ""
-        Write-Host "Ollama is installed but its server did not respond on localhost:11434." -ForegroundColor Red
-        Write-Host "Start Ollama (e.g. from the Start menu) and re-run install.ps1."
-        exit 1
-    }
-
-    Write-Host ""
-    Write-Host "Pulling required AI models (this may take a while)..." -ForegroundColor Cyan
-    foreach ($model in $models) {
-        Write-Host ""
-        Write-Host "  Pulling: $model" -ForegroundColor White
-        ollama pull $model
-        if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
-    }
-} else {
+if (-not (Test-Command "ollama")) {
     Write-Host "Ollama is not installed." -ForegroundColor Yellow
     Write-Host "Ollama provides the AI models that power OpenHealth."
     Write-Host ""
     $choice = Read-Host "Would you like to install Ollama now? (Y/N)"
 
-    if ($choice -match "^[Yy]") {
-        if (Test-Command "winget") {
-            Write-Host ""
-            Write-Host "Installing Ollama via winget..." -ForegroundColor Cyan
-            winget install Ollama.Ollama
-
-            # Refresh PATH in the current session so ollama is immediately available
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                        [System.Environment]::GetEnvironmentVariable("Path", "User")
-
-            if (-not (Test-Command "ollama")) {
-                Write-Host ""
-                Write-Host "Ollama was installed but could not be found in PATH." -ForegroundColor Yellow
-                Write-Host "Please close this terminal, open a new one, and re-run install.ps1."
-                exit 1
-            }
-            Write-Host "Ollama installed successfully." -ForegroundColor Green
-
-            # A fresh winget install does not start the Ollama server, and every
-            # "ollama pull" below would fail against an unreachable localhost:11434.
-            if (-not (Start-OllamaServer)) {
-                Write-Host ""
-                Write-Host "Ollama was installed but its server did not start." -ForegroundColor Red
-                Write-Host "Start Ollama from the Start menu, then re-run install.ps1."
-                exit 1
-            }
-        } else {
-            Write-Host ""
-            Write-Host "winget is not available on this machine." -ForegroundColor Yellow
-            Write-Host "Please install Ollama manually and re-run this installer:"
-            Write-Host "  https://ollama.com/download/windows"
-            exit 1
-        }
-
+    if ($choice -notmatch "^[Yy]") {
         Write-Host ""
-        Write-Host "Copying compose configuration (host Ollama)..."
-        Copy-Item "docker\docker-compose.windows-ollama-host.yml" "docker-compose.yml" -Force
-
-        Write-Host ""
-        Write-Host "Pulling required AI models (this may take a while)..." -ForegroundColor Cyan
-        foreach ($model in $models) {
-            Write-Host ""
-            Write-Host "  Pulling: $model" -ForegroundColor White
-            ollama pull $model
-            if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
-        }
-    } else {
-        Write-Host ""
-        Write-Host "Using the bundled Ollama Docker container instead." -ForegroundColor Cyan
-        Write-Host "Copying compose configuration (Docker Ollama)..."
-        Copy-Item "docker\docker-compose.windows-ollama-docker.yml" "docker-compose.yml" -Force
-
-        Write-Host ""
-        Write-Host "Starting Ollama container to pull models..." -ForegroundColor Cyan
-        docker compose up -d ollama
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host ""
-            Write-Host "Failed to start the Ollama container." -ForegroundColor Red
-            exit 1
-        }
-
-        $ready = Wait-ForOllama
-
-        if (-not $ready) {
-            Write-Host ""
-            Write-Host "Ollama container did not respond in time." -ForegroundColor Red
-            Write-Host "You can pull models manually once the container is running:"
-            foreach ($model in $models) {
-                Write-Host "  docker exec ollama ollama pull $model"
-            }
-            exit 1
-        }
-
-        Write-Host "Ollama is ready." -ForegroundColor Green
-        Write-Host ""
-        Write-Host "Pulling required AI models (this may take a while)..." -ForegroundColor Cyan
-        foreach ($model in $models) {
-            Write-Host ""
-            Write-Host "  Pulling: $model" -ForegroundColor White
-            docker exec ollama ollama pull $model
-            if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
-        }
-
-        Write-Host ""
-        Write-Host "Stopping Ollama container (it will start again with the full stack)..."
-        docker compose stop ollama
+        Write-Host "Ollama is required. Install it and re-run install.ps1:" -ForegroundColor Yellow
+        Write-Host "  https://ollama.com/download/windows"
+        exit 1
     }
+
+    if (-not (Test-Command "winget")) {
+        Write-Host ""
+        Write-Host "winget is not available on this machine." -ForegroundColor Yellow
+        Write-Host "Please install Ollama manually and re-run this installer:"
+        Write-Host "  https://ollama.com/download/windows"
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "Installing Ollama via winget..." -ForegroundColor Cyan
+    winget install -e --id Ollama.Ollama --accept-package-agreements --accept-source-agreements
+
+    # Refresh PATH in the current session so ollama is immediately available.
+    Update-SessionPath
+
+    if (-not (Test-Command "ollama")) {
+        Write-Host ""
+        Write-Host "Ollama was installed but could not be found in PATH." -ForegroundColor Yellow
+        Write-Host "Please close this terminal, open a new one, and re-run install.ps1."
+        exit 1
+    }
+    Write-Host "Ollama installed successfully." -ForegroundColor Green
+} else {
+    Write-Host "Ollama is already installed." -ForegroundColor Green
 }
 
-# -- 4. Create data directory --------------------------------------------------
+Write-Host ""
+Write-Host "Copying compose configuration (host Ollama)..."
+Copy-Item "docker\docker-compose.ollama-host.yml" "docker-compose.yml" -Force
+
+# A fresh install (or a host where the tray app isn't up yet) won't have the
+# server running, and every "ollama pull" below needs it.
+if (-not (Start-OllamaServer)) {
+    Write-Host ""
+    Write-Host "Ollama is installed but its server did not respond on localhost:11434." -ForegroundColor Red
+    Write-Host "Start Ollama (e.g. from the Start menu) and re-run install.ps1."
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Pulling required AI models (this may take a while)..." -ForegroundColor Cyan
+foreach ($model in $models) {
+    Write-Host ""
+    Write-Host "  Pulling: $model" -ForegroundColor White
+    ollama pull $model
+    if ($LASTEXITCODE -ne 0) { $pullFailures += $model }
+}
+
+# -- 5. Create data directory --------------------------------------------------
 
 if (-not (Test-Path "data")) {
     Write-Host ""
@@ -223,7 +225,7 @@ if (-not (Test-Path "data")) {
     New-Item -ItemType Directory -Path "data" | Out-Null
 }
 
-# -- 5. Done -------------------------------------------------------------------
+# -- 6. Done -------------------------------------------------------------------
 
 if ($pullFailures.Count -gt 0) {
     Write-Host ""
