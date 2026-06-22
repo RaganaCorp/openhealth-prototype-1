@@ -1,0 +1,30 @@
+{
+  "document_date": null,
+  "document_date_type": null,
+  "problems": [
+    { "name": "", "status": null, "date": null }
+  ],
+  "medications": [
+    { "name": "", "dose": null, "frequency": null, "status": null }
+  ],
+  "lab_results": [
+    {
+      "test": "",
+      "canonical_name": null,
+      "value": null,
+      "unit": null,
+      "reference_range": null,
+      "date": null,
+      "date_type": null
+    }
+  ],
+  "vitals": [
+    { "name": "", "value": null, "unit": null, "date": null }
+  ],
+  "allergies": [
+    { "substance": "", "reaction": null, "severity": null }
+  ],
+  "procedures": [
+    { "name": "", "date": null }
+  ]
+}

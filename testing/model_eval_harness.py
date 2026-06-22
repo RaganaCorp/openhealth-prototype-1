@@ -1,5 +1,15 @@
 """
-Evaluate prompt scenarios across installed non-embedding Ollama models.
+Evaluate the real ingestion prompts across installed Ollama models, scoring
+quality (via an external judge LLM) and speed. Scenarios exercise the *actual*
+pipeline code — structured per-category extraction, vision transcription, and
+grounding — reusing backend/documents.py, extraction.py, and prompts.py so the
+eval tracks what the app really does.
+
+PRIVACY: this sends data-test content — including images, when a vision-capable
+judge scores transcriptions — to external reference/judge LLMs (OpenAI/Anthropic/
+Gemini). Keep data-test/ SYNTHETIC; never put real patient data there. The app
+itself stays fully local; this dev-only harness does not. With no judge configured
+and image-only inputs, nothing leaves the machine (local Ollama only).
 
 Outputs:
   - data-test/model_eval_matrix.csv   (rows=scenarios, columns=models)
@@ -9,8 +19,8 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
-import html
 import json
 import os
 import re
@@ -20,15 +30,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Any
-from urllib import error, request
+from urllib import request
 
-import fitz  # PyMuPDF
+from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[2]
+# This file lives in <project_root>/testing/, so the project root is one level up.
+ROOT = Path(__file__).resolve().parents[1]
 DATA_TEST_DIR = ROOT / "data-test"
 OUT_MATRIX = DATA_TEST_DIR / "model_eval_matrix.csv"
 OUT_DETAILS = DATA_TEST_DIR / "model_eval_details.csv"
 OUT_ERRORS = DATA_TEST_DIR / "model_eval_errors.jsonl"
+OUT_OUTPUTS_DIR = DATA_TEST_DIR / "outputs"
 EXPECTED_DIR = DATA_TEST_DIR / "expected"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 DEFAULT_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
@@ -71,25 +83,34 @@ _VERIFICATION_SCHEMA: dict[str, Any] = {
 
 
 sys.path.insert(0, str(ROOT / "backend"))
+import documents  # noqa: E402
+import extraction  # noqa: E402
 import llm  # noqa: E402
+import prompts  # noqa: E402
 
 
-SCENARIO_RUBRICS = {
-    "verification": (
-        "Score factual grounding. 100 means the candidate correctly removes or qualifies unsupported claims, "
-        "uses evidence from the context, and returns the requested JSON structure."
-    ),
-    "summary_generation": (
-        "Score whether the candidate produces a clinically useful summary with the required sections and accurate facts."
-    ),
-    "extraction_pass1": (
-        "Score whether the candidate extracts only explicit facts, avoids hallucinations, de-duplicates repeated facts, "
-        "and fits the requested schema."
-    ),
-    "json_document_extraction": (
-        "Score whether the candidate accurately extracts clinically relevant facts from the JSON document input."
-    ),
-}
+_VERIFICATION_RUBRIC = (
+    "Score factual grounding. 100 means the candidate correctly removes or qualifies unsupported claims, "
+    "uses evidence from the context, and returns the requested JSON structure."
+)
+_EXTRACTION_RUBRIC = (
+    "Score extraction recall and precision against the section text: did it capture the explicit facts "
+    "present (and ONLY those), avoid hallucinations, avoid repeating the same item, and fit the schema?"
+)
+_VISION_RUBRIC = (
+    "Score transcription fidelity: does the output faithfully reproduce the document's visible text — "
+    "values, units, dates, labels — without inventing, summarizing, or repeating content?"
+)
+
+
+def scenario_rubric(scenario_name: str) -> str:
+    if scenario_name.startswith("extract_"):
+        return _EXTRACTION_RUBRIC
+    if scenario_name.startswith("vision_transcription"):
+        return _VISION_RUBRIC
+    if scenario_name == "verification":
+        return _VERIFICATION_RUBRIC
+    return ""
 
 
 @dataclass
@@ -147,25 +168,40 @@ def _http_json(
         return json.loads(raw)
 
 
+def _last_user_index(messages: list[dict[str, str]]) -> int:
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return -1
+
+
 def _call_external_llm(
     config: ExternalLLMConfig,
     messages: list[dict[str, str]],
     temperature: float = 0.0,
     max_tokens: int = 2048,
+    image_b64: str | None = None,
 ) -> str:
+    """Call an external reference/judge LLM. When image_b64 (a base64 PNG) is given
+    it's attached to the last user message in the provider's image format, so a
+    vision-capable judge can score a transcription against the source image."""
     provider = config.provider
+    img_idx = _last_user_index(messages) if image_b64 else -1
 
     if provider == "openai":
-        url = config.base_url or "https://api.openai.com/v1/chat/completions"
+        msgs: list[dict[str, Any]] = []
+        for i, m in enumerate(messages):
+            if i == img_idx:
+                msgs.append({"role": m["role"], "content": [
+                    {"type": "text", "text": str(m.get("content", ""))},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                ]})
+            else:
+                msgs.append({"role": m["role"], "content": str(m.get("content", ""))})
         data = _http_json(
             "POST",
-            url,
-            payload={
-                "model": config.model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
+            config.base_url or "https://api.openai.com/v1/chat/completions",
+            payload={"model": config.model, "messages": msgs, "temperature": temperature, "max_tokens": max_tokens},
             timeout=300,
             extra_headers={"Authorization": f"Bearer {config.api_key}"},
         )
@@ -173,11 +209,18 @@ def _call_external_llm(
 
     if provider == "anthropic":
         system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
-        chat_messages = [
-            {"role": "assistant" if m.get("role") == "assistant" else "user", "content": m.get("content", "")}
-            for m in messages
-            if m.get("role") in {"user", "assistant"}
-        ]
+        chat_messages: list[dict[str, Any]] = []
+        for i, m in enumerate(messages):
+            if m.get("role") not in {"user", "assistant"}:
+                continue
+            role = "assistant" if m.get("role") == "assistant" else "user"
+            if i == img_idx:
+                chat_messages.append({"role": role, "content": [
+                    {"type": "text", "text": str(m.get("content", ""))},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                ]})
+            else:
+                chat_messages.append({"role": role, "content": str(m.get("content", ""))})
         data = _http_json(
             "POST",
             config.base_url or "https://api.anthropic.com/v1/messages",
@@ -189,10 +232,7 @@ def _call_external_llm(
                 "max_tokens": max_tokens,
             },
             timeout=300,
-            extra_headers={
-                "x-api-key": config.api_key,
-                "anthropic-version": "2023-06-01",
-            },
+            extra_headers={"x-api-key": config.api_key, "anthropic-version": "2023-06-01"},
         )
         blocks = data.get("content", [])
         return "\n".join(str(block.get("text", "")) for block in blocks if isinstance(block, dict))
@@ -200,22 +240,17 @@ def _call_external_llm(
     if provider == "gemini":
         system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
         contents = []
-        for message in messages:
+        for i, message in enumerate(messages):
             role = message.get("role")
             if role not in {"user", "assistant"}:
                 continue
-            contents.append(
-                {
-                    "role": "model" if role == "assistant" else "user",
-                    "parts": [{"text": str(message.get("content", ""))}],
-                }
-            )
+            parts: list[dict[str, Any]] = [{"text": str(message.get("content", ""))}]
+            if i == img_idx:
+                parts.append({"inline_data": {"mime_type": "image/png", "data": image_b64}})
+            contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
         payload: dict[str, Any] = {
             "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
         }
         if system_parts:
             payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
@@ -264,68 +299,49 @@ def resolve_requested_models(installed: list[str], requested_models: list[str]) 
     return {m: m for m in requested_models}
 
 
-def _extract_pdf_text(path: Path) -> str:
-    doc = fitz.open(str(path))
-    parts: list[str] = []
-    for page in doc:
-        txt = page.get_text().strip()
-        if txt:
-            parts.append(txt)
-    doc.close()
-    return "\n\n".join(parts)
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 
-def _extract_html_text(path: Path) -> str:
-    raw = path.read_text(encoding="utf-8", errors="replace")
-    raw = re.sub(r"<style\b[^>]*>[\s\S]*?</style>", " ", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"<script\b[^>]*>[\s\S]*?</script>", " ", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"<!--([\s\S]*?)-->", " ", raw)
-    text = re.sub(r"<[^>]+>", " ", raw)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def _extract_document_text(path: Path) -> str:
+    """Extract text from a data-test document using the REAL pipeline extractors
+    (text-only — no vision), so the eval sees exactly what ingestion produces."""
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return documents._extract_pdf(path)
+    if suffix in {".html", ".htm"}:
+        return documents._extract_html(path)
+    if suffix in {".txt", ".md"}:
+        return path.read_text(encoding="utf-8", errors="replace")
+    if suffix == ".json":
+        return documents._extract_json(path)
+    return ""
 
 
-def load_data_test_context() -> tuple[str, str]:
+def load_eval_inputs() -> tuple[str, list[Path]]:
+    """Return (patient_text, image_paths). patient_text is the concatenated text of
+    the data-test *text* documents via the real extractors (drives the extraction +
+    grounding scenarios); image_paths are all images found (each drives a vision
+    transcription scenario). Images are not OCR'd into patient_text — extraction is
+    evaluated on clean text, and reading the image is what the vision scenario tests."""
     files = [
-        f
-        for f in DATA_TEST_DIR.iterdir()
+        f for f in DATA_TEST_DIR.iterdir()
         if f.is_file() and "model_eval" not in f.name.lower()
     ]
     text_chunks: list[str] = []
-    json_source = ""
+    image_paths: list[Path] = []
 
     for f in sorted(files, key=lambda p: p.name.lower()):
-        suffix = f.suffix.lower()
-        extracted = ""
-        if suffix == ".pdf":
-            extracted = _extract_pdf_text(f)
-        elif suffix in {".html", ".htm"}:
-            extracted = _extract_html_text(f)
-        elif suffix in {".txt", ".md"}:
-            extracted = f.read_text(encoding="utf-8", errors="replace")
-        elif suffix == ".json":
-            extracted = f.read_text(encoding="utf-8", errors="replace")
-            if not json_source:
-                json_source = extracted
-
+        if f.suffix.lower() in _IMAGE_SUFFIXES:
+            image_paths.append(f)
+            continue
+        extracted = _extract_document_text(f)
         if extracted.strip():
-            text_chunks.append(f"DOCUMENT: {f.name}\n\n{extracted.strip()}")
+            text_chunks.append(extracted.strip())
 
-    if not text_chunks:
-        raise RuntimeError("No readable documents found in data-test directory.")
+    if not text_chunks and not image_paths:
+        raise RuntimeError("No readable documents or images found in data-test directory.")
 
-    patient_context = "\n\n".join(text_chunks)[:70000]
-
-    if not json_source:
-        synthetic = {
-            "source": "data-test documents",
-            "notes": patient_context[:2000],
-            "query": "Extract clinically relevant facts including diagnoses, medications, labs, and dates.",
-        }
-        json_source = json.dumps(synthetic, indent=2)
-
-    return patient_context, json_source[:12000]
+    return "\n\n".join(text_chunks)[:70000], image_paths
 
 
 def parse_json_response(text: str) -> Any:
@@ -434,7 +450,7 @@ def _generate_expected_output(
             "role": "user",
             "content": (
                 f"Scenario: {scenario['name']}\n"
-                f"Rubric: {SCENARIO_RUBRICS.get(scenario['name'], '')}\n"
+                f"Rubric: {scenario_rubric(scenario['name'])}\n"
                 f"Original scenario messages:\n{_render_messages(scenario['messages'])}"
                 f"{schema_text}\n\n"
                 "Return only the expected answer for this scenario."
@@ -453,6 +469,10 @@ def _ensure_expected_outputs(
         return cache
 
     for scenario in scenarios:
+        # Vision (and any non-text-judgeable scenario) has no meaningful text gold —
+        # an external reference LLM can't see the image.
+        if not scenario.get("text_judgeable", True):
+            continue
         if cache.get(scenario["name"], {}).get("expected_output"):
             continue
         expected_output = _generate_expected_output(scenario, reference_config)
@@ -464,6 +484,18 @@ def _ensure_expected_outputs(
         }
 
     return cache
+
+
+def _parse_judge_score(raw: str) -> tuple[float | None, str]:
+    parsed = parse_json_response(raw)
+    if not isinstance(parsed, dict):
+        return None, raw.strip()
+    rationale = str(parsed.get("rationale", "")).strip()
+    try:
+        numeric = max(0.0, min(100.0, float(parsed.get("correctness_score"))))
+    except (TypeError, ValueError):
+        return None, rationale or raw.strip()
+    return round(numeric, 2), rationale
 
 
 def _judge_candidate_output(
@@ -484,7 +516,7 @@ def _judge_candidate_output(
             "role": "user",
             "content": (
                 f"Scenario: {scenario_name}\n"
-                f"Rubric: {SCENARIO_RUBRICS.get(scenario_name, '')}\n\n"
+                f"Rubric: {scenario_rubric(scenario_name)}\n\n"
                 f"Expected output:\n{expected_output}\n\n"
                 f"Candidate output:\n{candidate_output}\n\n"
                 "Return JSON exactly like:\n"
@@ -493,79 +525,121 @@ def _judge_candidate_output(
         },
     ]
     raw = _call_external_llm(judge_config, messages, temperature=0.0, max_tokens=700)
-    parsed = parse_json_response(raw)
-    if not isinstance(parsed, dict):
-        return None, raw.strip()
-
-    score = parsed.get("correctness_score")
-    rationale = str(parsed.get("rationale", "")).strip()
-    try:
-        numeric = max(0.0, min(100.0, float(score)))
-    except (TypeError, ValueError):
-        return None, rationale or raw.strip()
-    return round(numeric, 2), rationale
+    return _parse_judge_score(raw)
 
 
-def _prepare_verification_context(patient_context: str) -> str:
-    """Reduce noisy chart text while preserving evidence-rich sections for grounding checks."""
-    text = re.sub(r"\s+", " ", patient_context)
-
-    priority_markers = [
-        "top Reason for Referral",
-        "top Assessments",
-        "top Problems",
-        "top Medications",
-        "top Results",
-        "top Allergies and Adverse Reactions",
+def _judge_vision_output(
+    scenario_name: str,
+    candidate_output: str,
+    image_b64: str,
+    judge_config: ExternalLLMConfig,
+) -> tuple[float | None, str]:
+    """Score a transcription against the source IMAGE using a vision-capable judge.
+    Requires EVAL_JUDGE_MODEL to be a multimodal model (e.g. gpt-4o, claude-3.5-sonnet,
+    gemini-1.5-pro)."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an evaluation judge for medical-document transcription. Compare the candidate "
+                "transcription against the attached document IMAGE. Return only JSON with keys "
+                "correctness_score and rationale."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Rubric: {scenario_rubric(scenario_name)}\n\n"
+                f"Candidate transcription:\n{candidate_output}\n\n"
+                "Score 0-100 how faithfully the transcription reproduces the text visible in the image "
+                "(values, units, dates, labels). Penalize invented, missing, or repeated content. "
+                'Return JSON exactly like:\n{"correctness_score": 0-100, "rationale": "brief explanation"}'
+            ),
+        },
     ]
+    raw = _call_external_llm(judge_config, messages, temperature=0.0, max_tokens=700, image_b64=image_b64)
+    return _parse_judge_score(raw)
 
-    chunks: list[str] = []
-    for marker in priority_markers:
-        pattern = re.compile(
-            rf"({re.escape(marker)}.*?)(?=top [A-Za-z]|DOCUMENT:|\Z)",
-            re.IGNORECASE,
-        )
-        m = pattern.search(text)
-        if m:
-            chunks.append(m.group(1).strip())
 
-    if not chunks:
-        return patient_context[:9000]
-
-    reduced = "\n\n".join(chunks)
+def _prepare_verification_context(patient_text: str) -> str:
+    """Build a compact, evidence-rich grounding context from the detected sections
+    (problems, labs, meds), via the real section detector; fall back to the head."""
+    sections = extraction._detect_sections(patient_text)
+    parts = [sections[k] for k in ("problems", "lab_results", "medications") if sections.get(k)]
+    reduced = "\n\n".join(parts) if parts else patient_text
     return reduced[:9000]
 
 
-def build_scenarios(patient_context: str, json_source: str) -> list[dict[str, Any]]:
-    verification_context = _prepare_verification_context(patient_context)
+def _make_array_validator(key: str) -> Callable[[str], bool]:
+    def validate(output: str) -> bool:
+        parsed = parse_json_response(output)
+        return isinstance(parsed, dict) and isinstance(parsed.get(key), list)
+    return validate
 
-    scenarios: list[dict[str, Any]] = [
-        {
+
+def build_scenarios(patient_text: str, image_paths: list[Path]) -> list[dict[str, Any]]:
+    scenarios: list[dict[str, Any]] = []
+
+    # Text-based scenarios run only when a text document is present — extraction and
+    # grounding need clean text, which an image alone doesn't provide.
+    if patient_text.strip():
+        sections = extraction._detect_sections(patient_text)
+        dob_hint = extraction._dob_hint(None)
+
+        # One scenario per category — the REAL extraction prompt, schema, and
+        # section-scoped input that the ingest pipeline uses.
+        for cat in extraction._CATEGORIES:
+            scope = sections.get(cat.key) or patient_text
+            prompt = prompts.CATEGORY_EXTRACTION_PROMPT.format(
+                category_label=cat.label,
+                category_key=cat.key,
+                category_instructions=cat.instructions,
+                dob_hint=dob_hint,
+                document_text=scope[:extraction._MAX_EXTRACTION_CHARS],
+            )
+            scenarios.append({
+                "name": f"extract_{cat.key}",
+                "output_format": cat.model.model_json_schema(),
+                "options": {"temperature": 0, "num_predict": extraction._CATEGORY_NUM_PREDICT},
+                "messages": [{"role": "user", "content": prompt}],
+                "validator": _make_array_validator(cat.key),
+            })
+
+        scenarios.append({
             "name": "verification",
             "output_format": _VERIFICATION_SCHEMA,
             "options": {"temperature": 0, "num_predict": 1024},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": llm.build_grounding_prompt(
-                        draft_answer="The patient has stage IV renal failure and is currently on warfarin daily.",
-                        context=verification_context,
-                    ),
-                }
-            ],
+            "messages": [{
+                "role": "user",
+                "content": llm.build_grounding_prompt(
+                    draft_answer="The patient has stage IV renal failure and is currently on warfarin daily.",
+                    context=_prepare_verification_context(patient_text),
+                ),
+            }],
             "validator": lambda output: isinstance(parse_json_response(output), dict),
-        },
-        {
-            "name": "json_document_extraction",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": llm.build_json_extraction_prompt(json_source),
-                }
-            ],
-            "validator": lambda output: len(output.strip()) > 120,
-        },
-    ]
+        })
+
+    # One vision-transcription scenario per image (normalized through the real vision
+    # preprocessing). Not text-judgeable — an external judge can't see the image — so
+    # it scores on binary validity + speed. Multi-frame TIFFs use the first frame.
+    for index, image_path in enumerate(image_paths, start=1):
+        name = "vision_transcription" if len(image_paths) == 1 else f"vision_transcription_{index}"
+        image_b64 = base64.b64encode(
+            documents._encode_for_vision(Image.open(image_path))
+        ).decode("ascii")
+        scenarios.append({
+            "name": name,
+            "text_judgeable": False,
+            "image_b64": image_b64,  # for the vision-capable judge
+            "options": {"temperature": 0, "num_predict": extraction._CATEGORY_NUM_PREDICT},
+            "messages": [{
+                "role": "user",
+                "content": prompts.VISION_TRANSCRIPTION_PROMPT,
+                "images": [image_b64],
+            }],
+            "validator": lambda output: len(output.strip()) > 80,
+        })
+
     return scenarios
 
 
@@ -612,6 +686,16 @@ def speed_score(latency_ms: int, has_output: bool) -> float:
 def performance_score(correctness: float, speed: float) -> float:
     """Combined score: 60% semantic correctness + 40% speed."""
     return round((0.6 * correctness) + (0.4 * speed), 2)
+
+
+def _save_output(scenario_name: str, model: str, output: str) -> None:
+    """Persist each model's raw output so transcriptions / extracted JSON can be read
+    and compared by hand — essential for vision, which has no automated judge."""
+    if not output.strip():
+        return
+    OUT_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_model = re.sub(r"[^A-Za-z0-9._-]", "_", model)
+    (OUT_OUTPUTS_DIR / f"{scenario_name}__{safe_model}.txt").write_text(output, encoding="utf-8")
 
 
 def _clip(text: str, max_chars: int = 4000) -> str:
@@ -684,8 +768,8 @@ def run(
     if not DATA_TEST_DIR.exists():
         raise RuntimeError(f"data-test directory not found at: {DATA_TEST_DIR}")
 
-    patient_context, json_source = load_data_test_context()
-    all_scenarios = build_scenarios(patient_context, json_source)
+    patient_text, image_paths = load_eval_inputs()
+    all_scenarios = build_scenarios(patient_text, image_paths)
 
     if selected_scenarios:
         wanted = set(selected_scenarios)
@@ -777,14 +861,20 @@ def run(
                 except Exception as exc:  # noqa: BLE001
                     error_text = str(exc)
 
-                if output.strip() and expected_output and judge_config:
+                _save_output(scenario_name, requested_model, output)
+
+                scenario_image = scenario.get("image_b64")
+                if output.strip() and judge_config:
                     try:
-                        judge_score, judge_rationale = _judge_candidate_output(
-                            scenario_name,
-                            output,
-                            expected_output,
-                            judge_config,
-                        )
+                        if scenario_image:
+                            # Vision: judge the transcription against the source image.
+                            judge_score, judge_rationale = _judge_vision_output(
+                                scenario_name, output, scenario_image, judge_config
+                            )
+                        elif expected_output:
+                            judge_score, judge_rationale = _judge_candidate_output(
+                                scenario_name, output, expected_output, judge_config
+                            )
                     except Exception as exc:  # noqa: BLE001
                         judge_rationale = f"judge_error: {exc}"
 
