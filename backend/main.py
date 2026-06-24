@@ -620,12 +620,14 @@ def _latest_by_name(entries: list[tuple]) -> list[tuple]:
 
 def build_facts_summary(record: dict) -> str:
     """Aggregate the per-document extracted facts into a compact structured snapshot
-    for chat context: current conditions, medications, allergies, and the most recent
-    value of each lab and vital. Returns '' when there are no facts yet (so chat
-    falls back to the retrieved narrative excerpts alone)."""
+    for chat context: conditions, medications, allergies, family history, procedures,
+    and the most recent value of each lab and vital. Returns '' when there are no facts
+    yet (so chat falls back to the retrieved narrative excerpts alone)."""
     problems: list[str] = []
     medications: list[str] = []
     allergies: list[str] = []
+    family_history: list[str] = []
+    procedures: list[tuple] = []
     labs: list[tuple] = []
     vitals: list[tuple] = []
 
@@ -635,6 +637,19 @@ def build_facts_summary(record: dict) -> str:
         problems += [p["name"] for p in facts.get("problems", []) if p.get("name")]
         medications += [m["name"] for m in facts.get("medications", []) if m.get("name")]
         allergies += [a["substance"] for a in facts.get("allergies", []) if a.get("substance")]
+        for fh in facts.get("family_history", []):
+            condition = fh.get("condition")
+            if condition:
+                relationship = fh.get("relationship")
+                family_history.append(f"{relationship}: {condition}" if relationship else condition)
+        # Procedures carry no value, so they're aggregated by name+date (not via
+        # _latest_by_name). This is also how procedure-only documents — e.g. a
+        # colonoscopy report — become visible in the snapshot at all.
+        procedures += [
+            (pr["name"], pr.get("date") or doc_date)
+            for pr in facts.get("procedures", [])
+            if pr.get("name")
+        ]
         for lab in facts.get("lab_results", []):
             name = lab.get("canonical_name") or lab.get("test")
             if name and lab.get("value"):
@@ -646,13 +661,20 @@ def build_facts_summary(record: dict) -> str:
     problems = _uniq_keep_order(problems)
     medications = _uniq_keep_order(medications)
     allergies = _uniq_keep_order(allergies)
+    family_history = _uniq_keep_order(family_history)
     latest_labs = _latest_by_name(labs)[:25]
     latest_vitals = _latest_by_name(vitals)
+
+    # Procedures: keep the most recent date per distinct procedure, newest first.
+    latest_procedures = _latest_by_name([(name, "", "", date) for name, date in procedures])
 
     def _measure_line(name: str, value: str, unit: str, date: str) -> str:
         unit_part = f" {unit}".rstrip()
         date_part = f" ({date})" if date else ""
         return f"- {name}: {value}{unit_part}{date_part}"
+
+    def _procedure_line(name: str, _value: str, _unit: str, date: str) -> str:
+        return f"- {name}" + (f" ({date})" if date else "")
 
     sections: list[str] = []
     if problems:
@@ -661,6 +683,10 @@ def build_facts_summary(record: dict) -> str:
         sections.append("Medications: " + ", ".join(medications))
     if allergies:
         sections.append("Allergies: " + ", ".join(allergies))
+    if family_history:
+        sections.append("Family history: " + ", ".join(family_history))
+    if latest_procedures:
+        sections.append("Procedures:\n" + "\n".join(_procedure_line(*p) for p in latest_procedures))
     if latest_labs:
         sections.append("Most recent labs:\n" + "\n".join(_measure_line(*lab) for lab in latest_labs))
     if latest_vitals:
@@ -1204,10 +1230,12 @@ async def chat(body: ChatRequest):
             # Surface a residual uncertainty (incl. a verification that could not
             # be completed — verify_grounding fails closed with a non-empty note)
             # so the user is never shown an unverified answer as if it were clean.
-            # Gate on citations: a general-knowledge answer draws on no record chunks
-            # (so citations is empty) and makes no record claims, so a "could not be
-            # verified against the record" note there is misleading — suppress it.
-            if grounding_uncertainty and citations:
+            # NOTE: this fires on general-knowledge answers too, because retrieval is
+            # unconditional (query_docs always returns chunks, so gating on citations
+            # doesn't distinguish general vs. record questions). Suppressing the banner
+            # on general answers belongs in the verification-routing rework (backlog),
+            # not here.
+            if grounding_uncertainty:
                 final_answer = f"{final_answer}\n\n_{grounding_uncertainty.strip()}_"
 
         # 8. Persist the exchange to the message log NOW — it's the source of truth
