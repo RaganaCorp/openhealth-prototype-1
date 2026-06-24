@@ -433,10 +433,14 @@ def _rebuild_patient_md(patient_folder: Path, doc_records: list[dict]) -> None:
             "text": text,
         })
 
-    # Sort chronologically; "unknown" dates last.
-    docs_with_text.sort(
-        key=lambda d: (d["date_detected"] == "unknown", d["date_detected"])
-    )
+    # Sort chronologically (oldest first), unknown dates last. Compare on a
+    # normalized ISO key so mixed source formats (MM/DD/YYYY vs ISO) and case-variant
+    # "Unknown"/"unknown" order correctly instead of by raw string.
+    def _sort_key(d: dict) -> tuple[bool, str]:
+        iso = docs_module.date_sort_key(d.get("date_detected"))
+        return (iso == "", iso)
+
+    docs_with_text.sort(key=_sort_key)
     docs_module.write_patient_md(patient_folder, docs_with_text)
 
 

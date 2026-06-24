@@ -350,6 +350,22 @@ def _normalize_date(raw: str) -> str:
     return raw
 
 
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def date_sort_key(date: Optional[str]) -> str:
+    """Chronological sort key for a possibly mixed-format or unknown date.
+
+    Returns an ISO 'YYYY-MM-DD' string when the date parses, else '' so that
+    unknown/unparseable dates sort *oldest* (before any real date). Comparing
+    detected dates as raw strings is unsafe: stored values mix 'MM/DD/YYYY' and
+    ISO, so '04/20/2021' > '2026-03-19' lexically, and the literal 'Unknown'
+    (capital U) outranks every digit — which made unknown-dated docs look newest.
+    Normalize through this key wherever dates are compared or sorted."""
+    iso = _normalize_date((date or "").strip())
+    return iso if _ISO_DATE_RE.fullmatch(iso) else ""
+
+
 def detect_date(text: str, patient_dob: Optional[str] = None) -> Optional[str]:
     """Return the first recognisable date in the first 2000 chars, normalised to
     ISO. Skips any date matching the patient's DOB — reports routinely print the

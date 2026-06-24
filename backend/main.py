@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 
 import ai
+import documents
 import jobs
 import llm
 import memory
@@ -604,14 +605,17 @@ def _uniq_keep_order(items: list[str]) -> list[str]:
 
 
 def _latest_by_name(entries: list[tuple]) -> list[tuple]:
-    """From (name, value, unit, date) tuples keep the most recent per name, newest first."""
+    """From (name, value, unit, date) tuples keep the most recent per name, newest first.
+    Dates are mixed-format/unknown, so compare on a normalized ISO key rather than the
+    raw string (see documents.date_sort_key) — otherwise an older record can be picked
+    as 'most recent' and unknown-dated entries sort as newest."""
     best: dict[str, tuple] = {}
     for name, value, unit, date in entries:
         key = name.strip().lower()
         cur = best.get(key)
-        if cur is None or (date or "") > (cur[3] or ""):
+        if cur is None or documents.date_sort_key(date) > documents.date_sort_key(cur[3]):
             best[key] = (name.strip(), value, unit, date)
-    return sorted(best.values(), key=lambda e: (e[3] or ""), reverse=True)
+    return sorted(best.values(), key=lambda e: documents.date_sort_key(e[3]), reverse=True)
 
 
 def build_facts_summary(record: dict) -> str:
@@ -1200,7 +1204,10 @@ async def chat(body: ChatRequest):
             # Surface a residual uncertainty (incl. a verification that could not
             # be completed — verify_grounding fails closed with a non-empty note)
             # so the user is never shown an unverified answer as if it were clean.
-            if grounding_uncertainty:
+            # Gate on citations: a general-knowledge answer draws on no record chunks
+            # (so citations is empty) and makes no record claims, so a "could not be
+            # verified against the record" note there is misleading — suppress it.
+            if grounding_uncertainty and citations:
                 final_answer = f"{final_answer}\n\n_{grounding_uncertainty.strip()}_"
 
         # 8. Persist the exchange to the message log NOW — it's the source of truth
