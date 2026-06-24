@@ -19,14 +19,46 @@ export type SocialHistory = {
   sexual_protection?: "always" | "sometimes" | "never" | null;
 };
 
+export type FamilyRelationship =
+  | "mother"
+  | "father"
+  | "sister"
+  | "brother"
+  | "grandmother"
+  | "grandfather"
+  | "aunt"
+  | "uncle"
+  | "daughter"
+  | "son"
+  | "cousin"
+  | "other";
+
+// A relative + a condition they have/had. The condition reuses the preset/custom
+// shape of PatientCondition (minus category) so intake can pick from the catalog.
+export type FamilyHistoryEntry = {
+  relationship: FamilyRelationship;
+  code: string;
+  label: string;
+  source: "preset" | "custom";
+};
+
+export type PatientMedication = {
+  name: string;
+  dose?: string | null;
+  frequency?: string | null;
+};
+
 export type PatientProfileData = {
   dob?: string | null;
   sex_assigned_at_birth?: SexAssignedAtBirth | null;
   gender_identity?: string | null;
+  race?: string | null;
   height_cm?: number | null;
   weight_kg?: number | null;
   social_history?: SocialHistory | null;
   conditions?: PatientCondition[];
+  family_history?: FamilyHistoryEntry[];
+  medications?: PatientMedication[];
 };
 
 export type PatientIntake = {

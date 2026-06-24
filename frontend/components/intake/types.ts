@@ -1,6 +1,8 @@
 import type {
+  FamilyHistoryEntry,
   PatientCondition,
   PatientIntake,
+  PatientMedication,
   PatientProfileData,
   SexAssignedAtBirth,
   SocialHistory,
@@ -14,6 +16,7 @@ export type DemographicsDraft = {
   dob: string; // "YYYY-MM-DD" or ""
   sex: SexAssignedAtBirth | "";
   genderIdentity: string;
+  race: string; // free text
   heightUnit: "ftin" | "cm";
   heightFeet: string;
   heightInches: string;
@@ -26,6 +29,7 @@ export const emptyDemographics: DemographicsDraft = {
   dob: "",
   sex: "",
   genderIdentity: "",
+  race: "",
   heightUnit: "ftin",
   heightFeet: "",
   heightInches: "",
@@ -124,19 +128,35 @@ export function draftToSocialHistory(s: SocialHistoryDraft): SocialHistory | nul
   };
 }
 
+/** Normalize self-reported medications, dropping blank rows and trimming fields. */
+export function cleanMedications(medications: PatientMedication[]): PatientMedication[] {
+  return medications
+    .map((m) => ({
+      name: m.name.trim(),
+      dose: m.dose?.trim() || null,
+      frequency: m.frequency?.trim() || null,
+    }))
+    .filter((m) => m.name !== "");
+}
+
 export function buildProfile(
   demographics: DemographicsDraft,
   social: SocialHistoryDraft,
   conditions: PatientCondition[],
+  familyHistory: FamilyHistoryEntry[] = [],
+  medications: PatientMedication[] = [],
 ): PatientProfileData {
   return {
     dob: demographics.dob || null,
     sex_assigned_at_birth: demographics.sex || null,
     gender_identity: demographics.genderIdentity.trim() || null,
+    race: demographics.race.trim() || null,
     height_cm: draftHeightToCm(demographics),
     weight_kg: draftWeightToKg(demographics),
     social_history: draftToSocialHistory(social),
     conditions,
+    family_history: familyHistory,
+    medications: cleanMedications(medications),
   };
 }
 
@@ -145,10 +165,12 @@ export function buildIntakePayload(
   demographics: DemographicsDraft,
   social: SocialHistoryDraft,
   conditions: PatientCondition[],
+  familyHistory: FamilyHistoryEntry[] = [],
+  medications: PatientMedication[] = [],
 ): PatientIntake {
   return {
     name: name.trim(),
-    profile: buildProfile(demographics, social, conditions),
+    profile: buildProfile(demographics, social, conditions, familyHistory, medications),
   };
 }
 
@@ -163,6 +185,7 @@ export function demographicsFromProfile(profile: PatientProfileData | null | und
   draft.dob = profile.dob ?? "";
   draft.sex = profile.sex_assigned_at_birth ?? "";
   draft.genderIdentity = profile.gender_identity ?? "";
+  draft.race = profile.race ?? "";
   if (typeof profile.height_cm === "number") {
     const { feet, inches } = cmToFeetInches(profile.height_cm);
     draft.heightFeet = String(feet);
@@ -197,6 +220,7 @@ export function demographicsTouched(d: DemographicsDraft): boolean {
     d.dob !== "" ||
     d.sex !== "" ||
     d.genderIdentity.trim() !== "" ||
+    d.race.trim() !== "" ||
     d.heightFeet !== "" ||
     d.heightInches !== "" ||
     d.heightCm !== "" ||

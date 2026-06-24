@@ -266,6 +266,10 @@ def _safe_error_detail(exc: Exception, fallback: str) -> str:
 
 _SEX_VALUES = {"male", "female", "intersex", "undisclosed"}
 _CONDITION_SOURCES = {"preset", "custom"}
+_FAMILY_RELATIONSHIPS = {
+    "mother", "father", "sister", "brother", "grandmother", "grandfather",
+    "aunt", "uncle", "daughter", "son", "cousin", "other",
+}
 # Allowed values for each enum-style social-history field.
 _SOCIAL_ENUMS = {
     "tobacco_status": {"never", "former", "current"},
@@ -302,6 +306,57 @@ class ConditionIn(BaseModel):
         if value not in _CONDITION_SOURCES:
             raise ValueError(f"source must be one of {sorted(_CONDITION_SOURCES)}")
         return value
+
+
+class FamilyHistoryIn(BaseModel):
+    # A relative and a condition they have/had. The condition reuses the same
+    # preset/custom shape as ConditionIn (minus category) so the intake UI can pick
+    # from the condition catalog.
+    relationship: str
+    code: str
+    label: str
+    source: str = "preset"
+
+    @field_validator("relationship", mode="before")
+    @classmethod
+    def _valid_relationship(cls, value):
+        value = _blank_str_to_none(value)
+        normalized = (value or "").lower()
+        if normalized not in _FAMILY_RELATIONSHIPS:
+            raise ValueError(f"relationship must be one of {sorted(_FAMILY_RELATIONSHIPS)}")
+        return normalized
+
+    @field_validator("code", "label")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Family history fields cannot be empty")
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def _valid_source(cls, value: str) -> str:
+        if value not in _CONDITION_SOURCES:
+            raise ValueError(f"source must be one of {sorted(_CONDITION_SOURCES)}")
+        return value
+
+
+class MedicationIn(BaseModel):
+    name: str
+    dose: Optional[str] = None
+    frequency: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Medication name cannot be empty")
+        return value.strip()
+
+    @field_validator("dose", "frequency", mode="before")
+    @classmethod
+    def _free_text(cls, value):
+        return _blank_str_to_none(value)
 
 
 class SocialHistoryIn(BaseModel):
@@ -359,12 +414,15 @@ class ProfileIn(BaseModel):
     dob: Optional[str] = None
     sex_assigned_at_birth: Optional[str] = None
     gender_identity: Optional[str] = None
+    race: Optional[str] = None
     height_cm: Optional[float] = None
     weight_kg: Optional[float] = None
     social_history: Optional[SocialHistoryIn] = None
     conditions: list[ConditionIn] = []
+    family_history: list[FamilyHistoryIn] = []
+    medications: list[MedicationIn] = []
 
-    @field_validator("gender_identity", "dob", mode="before")
+    @field_validator("gender_identity", "race", "dob", mode="before")
     @classmethod
     def _blank_to_none(cls, value):
         return _blank_str_to_none(value)
@@ -534,6 +592,9 @@ def serialize_profile(profile: Optional[dict]) -> str:
     gender = profile.get("gender_identity")
     if gender:
         lines.append(f"Gender identity: {gender}")
+    race = profile.get("race")
+    if race:
+        lines.append(f"Race/ethnicity: {race}")
     height_cm = profile.get("height_cm")
     if isinstance(height_cm, (int, float)):
         lines.append(f"Height: {height_cm:g} cm")
@@ -585,6 +646,33 @@ def serialize_profile(profile: Optional[dict]) -> str:
         lines.append("Conditions:")
         for category, labels in grouped.items():
             lines.append(f"- {category}: {', '.join(labels)}")
+
+    # Self-reported current medications (distinct from the meds extracted from
+    # uploaded documents, which the chat surfaces separately).
+    med_lines: list[str] = []
+    for m in profile.get("medications") or []:
+        name = m.get("name")
+        if not name:
+            continue
+        extra = [v for v in (m.get("dose"), m.get("frequency")) if v]
+        med_lines.append(f"- {name}" + (f" — {', '.join(extra)}" if extra else ""))
+    if med_lines:
+        lines.append("")
+        lines.append("Current medications (self-reported):")
+        lines.extend(med_lines)
+
+    # Family history, grouped by relative.
+    fh_grouped: dict[str, list[str]] = {}
+    for f in profile.get("family_history") or []:
+        relationship = (f.get("relationship") or "other").strip().lower()
+        label = f.get("label") or f.get("code")
+        if label:
+            fh_grouped.setdefault(relationship, []).append(label)
+    if fh_grouped:
+        lines.append("")
+        lines.append("Family history:")
+        for relationship, labels in fh_grouped.items():
+            lines.append(f"- {relationship.capitalize()}: {', '.join(labels)}")
 
     if not lines:
         return ""

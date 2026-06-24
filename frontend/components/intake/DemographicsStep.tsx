@@ -168,6 +168,16 @@ export function DemographicsStep({ patientName, value, onChange, embedded }: Dem
         />
       </label>
 
+      <label className="field-group">
+        <span className="field-label">Race / ethnicity</span>
+        <input
+          className={`field-input ${value.race.trim() ? "is-filled" : ""}`}
+          onChange={(event) => patch({ race: event.target.value })}
+          placeholder="e.g. South Asian, Black, White, Hispanic/Latino"
+          value={value.race}
+        />
+      </label>
+
       <div className="grid gap-5 sm:grid-cols-2">
         <div className="field-group">
           <span className="field-label">Height</span>

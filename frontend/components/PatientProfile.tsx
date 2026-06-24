@@ -6,7 +6,9 @@ import { CloseIcon } from "@/components/icons";
 import { ModalPortal } from "@/components/ModalPortal";
 import { ConditionsStep } from "@/components/intake/ConditionsStep";
 import { DemographicsStep } from "@/components/intake/DemographicsStep";
+import { FamilyHistoryStep } from "@/components/intake/FamilyHistoryStep";
 import { LifestyleStep } from "@/components/intake/LifestyleStep";
+import { MedicationsStep } from "@/components/intake/MedicationsStep";
 import {
   buildProfile,
   demographicsFromProfile,
@@ -16,8 +18,10 @@ import {
 } from "@/components/intake/types";
 import {
   updatePatientProfile,
+  type FamilyHistoryEntry,
   type Patient,
   type PatientCondition,
+  type PatientMedication,
   type SexAssignedAtBirth,
   type SocialHistory,
 } from "@/lib/api";
@@ -125,6 +129,15 @@ function ProfileView({ patient, onEdit }: { patient: Patient; onEdit: () => void
   }, {});
   const categories = Object.keys(byCategory);
 
+  const familyHistory = profile.family_history ?? [];
+  const familyByRelationship = familyHistory.reduce<Record<string, FamilyHistoryEntry[]>>((acc, entry) => {
+    (acc[entry.relationship] ??= []).push(entry);
+    return acc;
+  }, {});
+  const relationships = Object.keys(familyByRelationship);
+
+  const medications = profile.medications ?? [];
+
   return (
     <div className="panel-scroll flex-1 space-y-6">
       <div className="flex items-start justify-between gap-3">
@@ -142,6 +155,7 @@ function ProfileView({ patient, onEdit }: { patient: Patient; onEdit: () => void
         <Field label="Date of birth" value={dobValue} />
         <Field label="Sex assigned at birth" value={sexValue} />
         <Field label="Gender identity" value={profile.gender_identity ?? null} />
+        <Field label="Race / ethnicity" value={profile.race ?? null} />
         <Field label="Height" value={heightValue} />
         <Field label="Weight" value={weightValue} />
       </div>
@@ -180,16 +194,57 @@ function ProfileView({ patient, onEdit }: { patient: Patient; onEdit: () => void
           </div>
         )}
       </div>
+
+      <div>
+        <h3 className="field-label mb-2">Family history</h3>
+        {relationships.length === 0 ? (
+          <div className="empty-state">No family history recorded.</div>
+        ) : (
+          <div className="space-y-4">
+            {relationships.map((relationship) => (
+              <div key={relationship}>
+                <p className="text-sm font-semibold text-text-primary">{titleCase(relationship)}</p>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {familyByRelationship[relationship].map((entry) => (
+                    <span className="status-chip" key={`${entry.relationship}:${entry.code}`}>
+                      {entry.label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h3 className="field-label mb-2">Current medications</h3>
+        {medications.length === 0 ? (
+          <div className="empty-state">No medications recorded.</div>
+        ) : (
+          <div className="profile-grid">
+            {medications.map((med, index) => (
+              <Field
+                key={`${med.name}:${index}`}
+                label={med.name}
+                value={[med.dose, med.frequency].filter(Boolean).join(", ") || "—"}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-type EditTab = "demographics" | "lifestyle" | "conditions";
+type EditTab = "demographics" | "lifestyle" | "conditions" | "family" | "medications";
 
 const EDIT_TABS: { id: EditTab; label: string }[] = [
   { id: "demographics", label: "Demographics" },
   { id: "lifestyle", label: "Lifestyle" },
   { id: "conditions", label: "Conditions" },
+  { id: "family", label: "Family" },
+  { id: "medications", label: "Medications" },
 ];
 
 function ProfileEditorModal({
@@ -209,6 +264,10 @@ function ProfileEditorModal({
     socialHistoryFromProfile(patient.profile?.social_history),
   );
   const [conditions, setConditions] = useState<PatientCondition[]>(() => patient.profile?.conditions ?? []);
+  const [familyHistory, setFamilyHistory] = useState<FamilyHistoryEntry[]>(
+    () => patient.profile?.family_history ?? [],
+  );
+  const [medications, setMedications] = useState<PatientMedication[]>(() => patient.profile?.medications ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const overlayDismiss = useModalDismiss(onClose);
@@ -237,7 +296,10 @@ function ProfileEditorModal({
     try {
       setSaving(true);
       setError(null);
-      const updated = await updatePatientProfile(patient.id, buildProfile(demographics, social, conditions));
+      const updated = await updatePatientProfile(
+        patient.id,
+        buildProfile(demographics, social, conditions, familyHistory, medications),
+      );
       onSaved(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save profile");
@@ -279,6 +341,12 @@ function ProfileEditorModal({
           ) : null}
           {tab === "conditions" ? (
             <ConditionsStep embedded onChange={setConditions} patientName={patient.name} selected={conditions} />
+          ) : null}
+          {tab === "family" ? (
+            <FamilyHistoryStep embedded onChange={setFamilyHistory} patientName={patient.name} value={familyHistory} />
+          ) : null}
+          {tab === "medications" ? (
+            <MedicationsStep embedded onChange={setMedications} patientName={patient.name} value={medications} />
           ) : null}
         </div>
 

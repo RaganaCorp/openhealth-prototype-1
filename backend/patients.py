@@ -164,10 +164,13 @@ def _empty_profile() -> dict[str, Any]:
         "dob": None,
         "sex_assigned_at_birth": None,
         "gender_identity": None,
+        "race": None,
         "height_cm": None,
         "weight_kg": None,
         "social_history": None,
         "conditions": [],
+        "family_history": [],
+        "medications": [],
     }
 
 
