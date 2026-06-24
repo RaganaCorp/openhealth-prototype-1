@@ -76,6 +76,14 @@ class Procedure(BaseModel):
     date: Optional[str] = None
 
 
+class FamilyHistory(BaseModel):
+    # A relative's condition. relationship is optional because notes sometimes record
+    # "family history of X" without naming who.
+    condition: str
+    relationship: Optional[str] = None
+    member: Optional[str] = None
+
+
 class DocumentFacts(BaseModel):
     # The clinically relevant date of the document itself (never the patient DOB).
     document_date: Optional[str] = None
@@ -86,6 +94,7 @@ class DocumentFacts(BaseModel):
     vitals: list[Vital] = Field(default_factory=list)
     allergies: list[Allergy] = Field(default_factory=list)
     procedures: list[Procedure] = Field(default_factory=list)
+    family_history: list[FamilyHistory] = Field(default_factory=list)
 
 
 # Single-array wrapper schemas — one focused shape per extraction call.
@@ -111,6 +120,10 @@ class _Allergies(BaseModel):
 
 class _Procedures(BaseModel):
     procedures: list[Procedure] = Field(default_factory=list)
+
+
+class _FamilyHistory(BaseModel):
+    family_history: list[FamilyHistory] = Field(default_factory=list)
 
 
 class _DocumentDate(BaseModel):
@@ -159,6 +172,13 @@ _CATEGORIES: tuple[_Category, ...] = (
         "procedures", "procedure or surgery", _Procedures,
         "Procedures and surgeries the patient has had. Exclude lab tests and lab orders.",
         ("procedure", "surg"),
+    ),
+    _Category(
+        "family_history", "family medical history entry", _FamilyHistory,
+        "Each entry pairs a relative's relationship (e.g. father, mother, sibling) with a "
+        "condition they have or had; include the relative's name in member if shown. Only "
+        "the patient's relatives — never the patient's own conditions.",
+        ("family history", "family"),
     ),
 )
 
