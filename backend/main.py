@@ -1242,24 +1242,30 @@ async def chat(body: ChatRequest):
         )
 
         # 4. Assemble prompt.
-        # Patient records go in the SYSTEM message so that small instruction-tuned
-        # models treat them as pre-loaded background knowledge rather than something
-        # the user is asking them to process. Only the conversational elements
-        # (state, history, question) go in the USER turn.
+        # Patient records AND the self-reported intake profile go in the SYSTEM message
+        # so that small instruction-tuned models treat them as pre-loaded background
+        # knowledge rather than something the user is asking them to process. Only the
+        # conversational elements (state, history, question) go in the USER turn.
+        #
+        # The profile is placed FIRST (before the documents) and labeled authoritative:
+        # when buried as one line in the user turn it was reliably ignored once a large
+        # document context was present, so self-reported facts (race, conditions like
+        # vitamin D deficiency / sleep apnea, family history) never surfaced. Up here it
+        # competes on equal footing with the records.
+        profile_text = serialize_profile(record.get("profile"))
+
         system_parts = [prompts.CHAT_SYSTEM_PROMPT]
+        if profile_text:
+            system_parts.append(
+                "\n\n--- PATIENT-PROVIDED INFORMATION (self-reported at intake; "
+                f"authoritative for demographics, family history, and current medications) ---\n{profile_text}"
+            )
         if patient_context:
-            system_parts.append(f"\n\n--- PATIENT RECORDS ---\n{patient_context}")
+            system_parts.append(f"\n\n--- PATIENT RECORDS (from uploaded documents) ---\n{patient_context}")
 
         system_prompt = "\n".join(system_parts)
 
-        # Structured intake profile (demographics, social history, conditions) the
-        # user supplied about the patient. Sent as a user content part so it frames
-        # the question as user-provided context rather than ingested record text.
-        profile_text = serialize_profile(record.get("profile"))
-
         user_content_parts = []
-        if profile_text:
-            user_content_parts.append(profile_text)
         if state_capsule:
             user_content_parts.append(f"CONVERSATION CONTEXT:\n{state_capsule}")
         if recent_turns_text:
