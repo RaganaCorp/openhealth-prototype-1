@@ -708,13 +708,18 @@ def _latest_by_name(entries: list[tuple]) -> list[tuple]:
 
 def build_facts_summary(record: dict) -> str:
     """Aggregate the per-document extracted facts into a compact structured snapshot
-    for chat context: conditions, medications, allergies, family history, procedures,
-    and the most recent value of each lab and vital. Returns '' when there are no facts
-    yet (so chat falls back to the retrieved narrative excerpts alone)."""
+    for chat context: conditions, medications, allergies, procedures, and the most
+    recent value of each lab and vital. Returns '' when there are no facts yet (so chat
+    falls back to the retrieved narrative excerpts alone).
+
+    NOTE: extracted family_history is deliberately NOT surfaced here. The small
+    extraction model produces unreliable family-history output (negative-checklist
+    rows, ICD codes, and the patient's own symptoms misfiled as relatives), so feeding
+    it to chat does more harm than good. Self-reported family history still reaches the
+    model via serialize_profile. Re-enable once extraction quality is hardened."""
     problems: list[str] = []
     medications: list[str] = []
     allergies: list[str] = []
-    family_history: list[str] = []
     procedures: list[tuple] = []
     labs: list[tuple] = []
     vitals: list[tuple] = []
@@ -725,11 +730,7 @@ def build_facts_summary(record: dict) -> str:
         problems += [p["name"] for p in facts.get("problems", []) if p.get("name")]
         medications += [m["name"] for m in facts.get("medications", []) if m.get("name")]
         allergies += [a["substance"] for a in facts.get("allergies", []) if a.get("substance")]
-        for fh in facts.get("family_history", []):
-            condition = fh.get("condition")
-            if condition:
-                relationship = fh.get("relationship")
-                family_history.append(f"{relationship}: {condition}" if relationship else condition)
+        # Extracted family_history intentionally skipped — see docstring.
         # Procedures carry no value, so they're aggregated by name+date (not via
         # _latest_by_name). This is also how procedure-only documents — e.g. a
         # colonoscopy report — become visible in the snapshot at all.
@@ -749,7 +750,6 @@ def build_facts_summary(record: dict) -> str:
     problems = _uniq_keep_order(problems)
     medications = _uniq_keep_order(medications)
     allergies = _uniq_keep_order(allergies)
-    family_history = _uniq_keep_order(family_history)
     latest_labs = _latest_by_name(labs)[:25]
     latest_vitals = _latest_by_name(vitals)
 
@@ -771,8 +771,6 @@ def build_facts_summary(record: dict) -> str:
         sections.append("Medications: " + ", ".join(medications))
     if allergies:
         sections.append("Allergies: " + ", ".join(allergies))
-    if family_history:
-        sections.append("Family history: " + ", ".join(family_history))
     if latest_procedures:
         sections.append("Procedures:\n" + "\n".join(_procedure_line(*p) for p in latest_procedures))
     if latest_labs:
